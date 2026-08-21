@@ -765,16 +765,23 @@ body.theme-sketch {
       });
     }
 
-    async function saveToIndexedDB(data) {
-      const db = await initIndexedDB();
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      return new Promise((resolve, reject) => {
-        const request = store.put({...data, timestamp: Date.now()});
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-    }
+
+/* ============= FIX SAVE TO INDEXEDDB (Stop Overwriting) ============= */
+async function saveToIndexedDB(data) {
+  const db = await initIndexedDB();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  return new Promise((resolve, reject) => {
+    // If the data already has a timestamp, keep it. Don't force Date.now()
+    const entry = {
+      ...data,
+      timestamp: data.timestamp || Date.now()
+    };
+    const request = store.put(entry);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
 
     async function loadFromIndexedDB() {
       const db = await initIndexedDB();
@@ -919,28 +926,10 @@ body.theme-sketch {
       return { goal, current: todayTotal };
     }
 
-   async function getWatchData() {
-  const sessions = await loadFromIndexedDB();
-  const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-  
-  let watchSessions = [];
-  let hour = 0;
-  
-  sessions.filter(s => s.date === today && (s.type === 'Target' || s.type === 'Open')).forEach((s, i) => {
-    const hrs = convertDurationToHours(s.duration);
-    watchSessions.push({
-      start: hour,
-      hrs: hrs
-    });
-    hour += hrs;
-  });
-  
-  return watchSessions;
-}
 
-    async function getDailyData() {
+async function getDailyData() {
   const grouped = await formatDataForCharts();
-  const result = [['Date', 'Hours', 'Start Time', 'Notes']];
+  const result = [['Date', 'Hours']];
   
   Object.keys(grouped).sort().forEach(date => {
     const hours = grouped[date]
@@ -949,7 +938,7 @@ body.theme-sketch {
         const durationHours = convertDurationToHours(s.duration);
         return sum + durationHours;
       }, 0);
-    result.push([date, hours, '', '']);
+    result.push([date, parseFloat(hours.toFixed(2))]);
   });
   
   return result;
@@ -958,94 +947,85 @@ body.theme-sketch {
 function convertDurationToHours(durationStr) {
   if (!durationStr || typeof durationStr !== 'string') return 0;
   
-  // Logic: Check for colon format (HH:MM:SS or MM:SS)
-  if (durationStr.includes(':')) {
-    const parts = durationStr.split(':').map(p => parseFloat(p) || 0);
-    if (parts.length === 3) {
-      // It is HH:MM:SS
-      return parts[0] + (parts[1] / 60) + (parts[2] / 3600);
-    } else if (parts.length === 2) {
-      // It is MM:SS
-      return (parts[0] / 60) + (parts[1] / 3600);
-    }
-  }
+  // Handle HH:MM:SS format (e.g., "00:16:28")
+  const parts = durationStr.split(':').map(p => parseInt(p) || 0);
   
-  // Logic: Fallback for single numbers (treated as minutes)
-  const mins = parseFloat(durationStr);
-  return isNaN(mins) ? 0 : mins / 60;
+  if (parts.length === 3) {
+    // HH:MM:SS
+    return parts[0] + (parts[1] / 60) + (parts[2] / 3600);
+  } else if (parts.length === 2) {
+    // MM:SS
+    return (parts[0] / 60) + (parts[1] / 3600);
+  } else {
+    // Plain minutes
+    return parseInt(durationStr) / 60;
+  }
 }
 
     /* ============= CHART FUNCTIONS ============= */
-    async function loadChart(view, chartDivId) {
-      const themeColors = getThemeColors();
-      const data = await getDailyData();
-      if (data.length <= 1) { 
-        document.getElementById(chartDivId).innerHTML = "No logs."; 
-        return; 
-      }
+ async function loadChart(view, chartDivId) {
+  const themeColors = getThemeColors();
+  const data = await getDailyData();
+  
+  if (data.length <= 1) { 
+    document.getElementById(chartDivId).innerHTML = "No logs."; 
+    return; 
+  }
 
-      let finalData = [];
-      let globalMax = 0;
-      const isMonthly = (view === 'Monthly');
+  let finalData = [];
+  let globalMax = 0;
 
-      if (view === 'Daily') {
-        const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-        const grouped = await formatDataForCharts();
-        const todayData = grouped[today] || [];
-        if (todayData.length === 0) { 
-          document.getElementById(chartDivId).innerHTML = "No sessions today."; 
-          return; 
-        }
-        finalData.push(['Session', 'Hours', { role: 'style' }, { role: 'annotation' }]);
-        let sessionCount = 1;
-        todayData.filter(s => s.type === 'Target').forEach(session => {
-          const hrs = parseFloat(session.duration) / 60;
-          const mins = Math.round((hrs % 1) * 60);
-          finalData.push(['S' + sessionCount, hrs, `color: ${themeColors.primary}; fill-opacity: 0.8`, Math.floor(hrs) + "h " + mins + "m"]);
-          if (hrs > globalMax) globalMax = hrs;
-          sessionCount++;
-        });
-      } else {
-        let sliced = isMonthly ? data.slice(-36) : data.slice(-8);
-        let totals = [];
-        sliced.slice(1).forEach(row => {
-          const total = row[1];
-          totals.push(total);
-          if (total > globalMax) globalMax = total;
-        });
-        finalData.push(['Date', 'Base', { role: 'style' }, { role: 'tooltip' }, { role: 'annotation' }]);
-        sliced.slice(1).forEach((row, i) => {
-          finalData.push([row[0], 0.05, 'none', '', totals[i] > 0 ? Math.round(totals[i] * 60) + 'm' : '']);
-        });
-      }
-
-      const chartData = google.visualization.arrayToDataTable(finalData);
-      const options = {
-        isStacked: view !== 'Daily',
-        legend: 'none',
-        backgroundColor: 'transparent',
-        chartArea: { width: '95%', height: '85%', top: 10, bottom: 25 },
-        bar: { groupWidth: isMonthly ? '98%' : '70%' },
-        vAxis: {
-          gridlines: { color: 'transparent' },
-          baselineColor: themeColors.primary,
-          viewWindow: { min: 0, max: globalMax > 0 ? (globalMax * 1.1) : 1 },
-          textPosition: 'none'
-        },
-        hAxis: {
-          textStyle: { fontSize: 8, color: themeColors.primary },
-          baselineColor: 'transparent',
-          gridlines: { color: 'transparent' }
-        },
-        annotations: {
-          alwaysOutside: true,
-          textStyle: { fontSize: 10, bold: true, color: themeColors.primary },
-          stem: { color: 'transparent', length: 0 }
-        },
-        animation: { startup: true, duration: 600, easing: 'out' }
-      };
-      new google.visualization.ColumnChart(document.getElementById(chartDivId)).draw(chartData, options);
+  if (view === 'Daily') {
+    const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+    const grouped = await formatDataForCharts();
+    const todayData = grouped[today] || [];
+    
+    if (todayData.length === 0) { 
+      document.getElementById(chartDivId).innerHTML = "No sessions today."; 
+      return; 
     }
+    
+    finalData.push(['Session', { type: 'number', label: 'Hours' }, { role: 'style' }]);
+    let sessionCount = 1;
+    
+    todayData.forEach(session => {
+      const hrs = convertDurationToHours(session.duration);
+      if (hrs > 0) {
+        finalData.push(['S' + sessionCount, hrs, `color: ${themeColors.primary}`]);
+        if (hrs > globalMax) globalMax = hrs;
+        sessionCount++;
+      }
+    });
+  } else {
+    const isMonthly = (view === 'Monthly');
+    let sliced = isMonthly ? data.slice(-36) : data.slice(-8);
+    
+    finalData.push(['Date', { type: 'number', label: 'Hours' }, { role: 'style' }]);
+    
+    sliced.slice(1).forEach((row) => {
+      const hours = parseFloat(row[1]);
+      finalData.push([row[0], hours, `color: ${themeColors.primary}`]);
+      if (hours > globalMax) globalMax = hours;
+    });
+  }
+
+  const chartData = google.visualization.arrayToDataTable(finalData);
+  const options = {
+    legend: 'none',
+    backgroundColor: 'transparent',
+    chartArea: { width: '90%', height: '80%' },
+    vAxis: {
+      gridlines: { color: 'transparent' },
+      minValue: 0,
+      maxValue: globalMax > 0 ? (globalMax * 1.2) : 5
+    },
+    hAxis: {
+      textStyle: { fontSize: 10, color: themeColors.primary }
+    }
+  };
+  
+  new google.visualization.ColumnChart(document.getElementById(chartDivId)).draw(chartData, options);
+}
 
     function loadChartDaily() { loadChart('Daily', 'chart_div_daily'); }
     function loadChartWeekly() { loadChart('Weekly', 'chart_div_weekly'); }
@@ -1171,116 +1151,250 @@ function convertDurationToHours(durationStr) {
       document.getElementById('gridWrapper').innerHTML = html;
     }
 
-    async function loadActualStudySessions() {
-      const sessions = await getWatchData();
-      const container = document.getElementById('actualContainer');
-      if (sessions.length === 0) {
-        container.innerHTML = '<div style="text-align: center; color: var(--text-tertiary); font-size: 12px; padding: 20px;">No sessions logged today yet</div>';
-        document.getElementById('actualTotalHours').innerText = '0.0h';
-        document.getElementById('actualSessionCount').innerText = '0';
-        document.getElementById('actualBreakTime').innerText = '0m';
-        return;
+/* ============= UPDATED ACTUAL LIST ============= */
+async function loadActualStudySessions() {
+  const sessions = await getWatchData();
+  const container = document.getElementById('actualContainer');
+  
+  if (sessions.length === 0) {
+    container.innerHTML = '<div style="text-align: center; color: var(--text-tertiary); font-size: 12px; padding: 20px;">No sessions logged today yet</div>';
+    return;
+  }
+
+  let totalStudyHrs = 0;
+  let totalBreakMins = 0;
+  let html = '<div style="display: flex; flex-direction: column; gap: 15px; padding: 5px;">';
+
+  sessions.forEach((sess, idx) => {
+    totalStudyHrs += sess.hrs;
+
+    // Manually format string to ensure no AM/PM jumping
+    const h = sess.startTimeObj.getHours().toString().padStart(2, '0');
+    const m = sess.startTimeObj.getMinutes().toString().padStart(2, '0');
+    const startTimeStr = `${h}:${m}`;
+
+    const studyMins = Math.round(sess.hrs * 60);
+    const studyDurationStr = studyMins >= 60 ? 
+      `${Math.floor(studyMins/60)}h ${studyMins%60}m` : `${studyMins}m`;
+
+    html += `
+      <div style="display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 600;">
+        <span style="color: #4285f4; min-width: 45px;">${startTimeStr}</span>
+        <span style="background: #4285f4; color: white; padding: 6px 12px; border-radius: 6px; font-size: 11px;">Study</span>
+        <span style="color: var(--text-secondary); min-width: 40px;">${studyDurationStr}</span>
+    `;
+
+    if (idx < sessions.length - 1) {
+      const nextSess = sessions[idx + 1];
+      const gapHrs = nextSess.start - (sess.start + sess.hrs);
+      const breakMins = Math.round(gapHrs * 60);
+
+      if (breakMins > 0) {
+        totalBreakMins += breakMins;
+        html += `
+          <span style="color: var(--text-tertiary); opacity: 0.5;">→</span>
+          <span style="background: #fbbc05; color: white; padding: 6px 12px; border-radius: 6px; font-size: 11px;">Break</span>
+          <span style="color: #fbbc05;">${breakMins}m</span>
+        `;
       }
-      let totalHours = 0;
-      let html = '<div style="font-size: 12px; line-height: 2;">';
-      sessions.forEach((sess, idx) => {
-        totalHours += sess.hrs;
-        const startHour = Math.floor(sess.start);
-        const startTime = startHour.toString().padStart(2, '0') + ':00';
-        const durationHours = Math.floor(sess.hrs);
-        const durationMin = Math.round((sess.hrs % 1) * 60);
-        const durationStr = durationHours > 0 ? `${durationHours}h ${durationMin}m` : `${durationMin}m`;
-        html += `<div style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--input-bg); border-radius: 6px;">
-          <span style="font-weight: 600; color: var(--primary); min-width: 50px;">${startTime}</span>
-          <span style="background: var(--primary); color: white; padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">Study</span>
-          <span style="color: var(--text-secondary); min-width: 70px;">${durationStr}</span>
-        </div>`;
-      });
-      html += '</div>';
-      container.innerHTML = html;
-      document.getElementById('actualTotalHours').innerText = totalHours.toFixed(1) + 'h';
-      document.getElementById('actualSessionCount').innerText = sessions.length;
-      document.getElementById('actualBreakTime').innerText = '0m';
     }
+    html += `</div>`;
+  });
 
-    async function loadDailyProgressChart() {
-      const themeColors = getThemeColors();
-      const sessions = await getWatchData();
-      const todayByHour = {};
-      sessions.forEach(s => {
-        const hour = Math.floor(s.start);
-        todayByHour[hour] = (todayByHour[hour] || 0) + s.hrs;
-      });
-      let chartData = [['Hour', 'Today', '7-Day Avg']];
-      let lastTodayVal = null;
-      for (let h = 0; h < 24; h++) {
-        const todayVal = todayByHour[h] || lastTodayVal;
-        if (todayVal) lastTodayVal = todayVal;
-        chartData.push([h.toString().padStart(2, '0') + ':00', todayVal, null]);
-      }
-      const table = google.visualization.arrayToDataTable(chartData);
-      new google.visualization.LineChart(document.getElementById('dailyProgressChart')).draw(table, {
-        legend: { position: 'bottom' },
-        pointSize: 4,
-        lineWidth: 2,
-        colors: [themeColors.primary, themeColors.warning],
-        backgroundColor: 'transparent',
-        chartArea: { width: '85%', height: '70%' },
-        hAxis: { textStyle: { fontSize: 10, color: themeColors.warning } },
-        vAxis: { textStyle: { fontSize: 10, color: themeColors.warning } }
-      });
+  html += '</div>';
+  container.innerHTML = html;
+
+  document.getElementById('actualTotalHours').innerText = totalStudyHrs.toFixed(1) + 'h';
+  document.getElementById('actualSessionCount').innerText = sessions.length;
+  document.getElementById('actualBreakTime').innerText = Math.round(totalBreakMins) + 'm';
+}
+
+
+/* ============= UPDATED PROGRESS CHART ============= */
+async function loadDailyProgressChart() {
+  const allSessions = await loadFromIndexedDB();
+  const todayNepal = getNepalTime(Date.now());
+  const todayStr = todayNepal.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+
+  let todayHourly = new Array(24).fill(0);
+  let historicalHourly = {};
+
+  allSessions.forEach(s => {
+    if (s.type !== 'Target' && s.type !== 'Open') return;
+    
+    const hrs = convertDurationToHours(s.duration);
+    const date = s.date;
+    // Interpret every timestamp in Nepal time
+    const completionTime = getNepalTime(s.timestamp);
+    const hour = completionTime.getHours();
+
+    if (date === todayStr) {
+      todayHourly[hour] += hrs;
+    } else {
+      if (!historicalHourly[date]) historicalHourly[date] = new Array(24).fill(0);
+      historicalHourly[date][hour] += hrs;
     }
+  });
 
-    async function loadMasterChronometer() {
-      const temporalRing = document.getElementById('masterTemporalRing');
-      const goalRing = document.getElementById('masterGoalRing');
-      const themeColors = getThemeColors();
-      const colors = [themeColors.primary, themeColors.success, themeColors.danger, themeColors.warning, '#8B4513', themeColors.calEvent];
-      const sessions = await getWatchData();
-      const goalData = await getGoal();
-      if (temporalRing) temporalRing.innerHTML = ''; 
-      if (goalRing) goalRing.innerHTML = '';
-      const dailyGoal = goalData.goal || 4;
-      let totalStudyH = 0;
+  let chartData = [];
+  let todayRunningTotal = 0;
+  let avgRunningTotal = 0;
+  const pastDates = Object.keys(historicalHourly).sort().slice(-7);
+  const dayCount = pastDates.length || 1;
 
-      const getArc = (sVal, dVal, tVal, outR, innR) => {
-        const sA = (sVal / tVal) * 360 - 90, eA = ((sVal + dVal) / tVal) * 360 - 90;
-        const sR = (sA * Math.PI) / 180, eR = (eA * Math.PI) / 180;
-        const large = (dVal / tVal) > 0.5 ? 1 : 0;
-        return `M ${150+outR*Math.cos(sR)} ${150+outR*Math.sin(sR)} A ${outR} ${outR} 0 ${large} 1 ${150+outR*Math.cos(eR)} ${150+outR*Math.sin(eR)} L ${150+innR*Math.cos(eR)} ${150+innR*Math.sin(eR)} A ${innR} ${innR} 0 ${large} 0 ${150+innR*Math.cos(sR)} ${150+innR*Math.sin(sR)} Z`;
+  for (let h = 0; h < 24; h++) {
+    todayRunningTotal += todayHourly[h];
+    let sumThisHourAcrossDays = 0;
+    pastDates.forEach(d => { sumThisHourAcrossDays += historicalHourly[d][h]; });
+    avgRunningTotal += (sumThisHourAcrossDays / dayCount);
+
+    if (h >= 7) {
+      chartData.push([
+        h.toString().padStart(2, '0') + ':00', 
+        parseFloat(todayRunningTotal.toFixed(2)), 
+        parseFloat(avgRunningTotal.toFixed(2))
+      ]);
+    }
+  }
+
+  const dataTable = new google.visualization.DataTable();
+  dataTable.addColumn('string', 'Hour');
+  dataTable.addColumn('number', 'Today');
+  dataTable.addColumn('number', '7-Day Avg');
+  dataTable.addRows(chartData);
+
+  new google.visualization.LineChart(document.getElementById('dailyProgressChart')).draw(dataTable, {
+    colors: ['#4285f4', '#fbbc05'],
+    chartArea: { width: '85%', height: '70%' },
+    pointSize: 6,
+    lineWidth: 3,
+    vAxis: { textStyle: { color: '#fbbc05', fontWeight: 'bold' } },
+    hAxis: { textStyle: { color: '#fbbc05', fontSize: 10, fontWeight: 'bold' }, slantedText: true }
+  });
+}
+
+/* ============= NEPAL TIME HELPER ============= */
+function getNepalTime(ts) {
+  const d = new Date(ts);
+  // getTimezoneOffset() returns minutes from UTC. 
+  // We calculate UTC first, then add exactly 5 hours and 45 minutes.
+  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
+  const nepalOffset = (5 * 60 + 45) * 60000; 
+  return new Date(utc + nepalOffset);
+}
+
+/* ============= UPDATED GET WATCH DATA ============= */
+async function getWatchData() {
+  const sessions = await loadFromIndexedDB();
+  // Ensure "today" is also calculated in Nepal time
+  const todayNepal = getNepalTime(Date.now());
+  const todayStr = todayNepal.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+  
+  return sessions
+    .filter(s => s.date === todayStr && (s.type === 'Target' || s.type === 'Open'))
+    .map(s => {
+      const durationHrs = convertDurationToHours(s.duration);
+      
+      // Convert the completion timestamp to a Nepal Date Object
+      const endTimeNepal = getNepalTime(s.timestamp);
+      
+      // Calculate start time based on Nepal Clock
+      const startTimeNepal = new Date(endTimeNepal.getTime() - (durationHrs * 3600000));
+      
+      // Create decimal for the 24-hour chronometer ring
+      const startHourDecimal = startTimeNepal.getHours() + (startTimeNepal.getMinutes() / 60) + (startTimeNepal.getSeconds() / 3600);
+      
+      return {
+        start: startHourDecimal,
+        hrs: durationHrs,
+        startTimeObj: startTimeNepal,
+        endTimeObj: endTimeNepal
       };
+    })
+    .sort((a, b) => a.start - b.start);
+}
 
-      if (sessions && sessions.length > 0) {
-        let cumulativeHrs = 0;
-        sessions.forEach((sess, idx) => {
-          totalStudyH += sess.hrs;
-          const sessionColor = colors[idx % colors.length];
-          const tPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-          tPath.setAttribute('d', getArc(sess.start, sess.hrs, 24, 140, 105.5));
-          tPath.setAttribute('fill', sessionColor);
-          tPath.setAttribute('stroke', 'white');
-          tPath.setAttribute('stroke-width', '0.5');
-          if (temporalRing) temporalRing.appendChild(tPath);
-          const gPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-          gPath.setAttribute('d', getArc(cumulativeHrs, sess.hrs, dailyGoal, 104.5, 70));
-          gPath.setAttribute('fill', sessionColor);
-          gPath.setAttribute('stroke', 'white');
-          gPath.setAttribute('stroke-width', '0.5');
-          if (goalRing) goalRing.appendChild(gPath);
-          cumulativeHrs += sess.hrs;
-        });
-      }
 
-      const percent = Math.round((totalStudyH / dailyGoal) * 100);
-      const totalEl = document.getElementById('masterTotalHours');
-      if (totalEl) totalEl.textContent = totalStudyH.toFixed(1) + 'h';
-      const percentEl = document.getElementById('masterGoalPercent');
-      if (percentEl) percentEl.textContent = percent + '%';
-      const breakEl = document.getElementById('masterBreak');
-      if (breakEl) breakEl.textContent = '0m';
-      const restEl = document.getElementById('masterRest');
-      if (restEl) restEl.textContent = totalStudyH.toFixed(1) + 'h';
+/* ============= HELPER: DECIMAL TO TIME STRING ============= */
+function formatDecimalToTime(decimal) {
+  // Handle negative wrapping (e.g., if a session started before midnight)
+  let hour = Math.floor((decimal + 24) % 24);
+  let min = Math.round(((decimal + 24) % 1) * 60);
+  if (min === 60) { min = 0; hour = (hour + 1) % 24; }
+  return `${hour.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}`;
+}
+
+async function loadMasterChronometer() {
+  const temporalRing = document.getElementById('masterTemporalRing');
+  const goalRing = document.getElementById('masterGoalRing');
+  const themeColors = getThemeColors();
+  const colors = [themeColors.primary, themeColors.success, themeColors.danger, themeColors.warning, '#8B4513', themeColors.calEvent];
+
+  const sessions = await getWatchData();
+  const goalData = await getGoal();
+  
+  if (temporalRing) temporalRing.innerHTML = ''; 
+  if (goalRing) goalRing.innerHTML = '';
+  
+  const dailyGoal = goalData.goal || 4;
+  let totalStudyH = 0;
+  let totalBreakM = 0;
+  let cumulativeHrsForGoal = 0;
+
+  const getArc = (startVal, durationVal, totalRange, outR, innR, color) => {
+    // Top of the circle is 0 (Midnight). 24 hours = 360 degrees.
+    const startAngle = (startVal / totalRange) * 360 - 90;
+    const endAngle = ((startVal + durationVal) / totalRange) * 360 - 90;
+    
+    const startRad = (startAngle * Math.PI) / 180;
+    const endRad = (endAngle * Math.PI) / 180;
+    const largeArcFlag = (durationVal / totalRange) > 0.5 ? 1 : 0;
+    
+    const path = `
+      M ${150 + outR * Math.cos(startRad)} ${150 + outR * Math.sin(startRad)}
+      A ${outR} ${outR} 0 ${largeArcFlag} 1 ${150 + outR * Math.cos(endRad)} ${150 + outR * Math.sin(endRad)}
+      L ${150 + innR * Math.cos(endRad)} ${150 + innR * Math.sin(endRad)}
+      A ${innR} ${innR} 0 ${largeArcFlag} 0 ${150 + innR * Math.cos(startRad)} ${150 + innR * Math.sin(startRad)}
+      Z`;
+    
+    const svgPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    svgPath.setAttribute('d', path);
+    svgPath.setAttribute('fill', color);
+    svgPath.setAttribute('stroke', 'var(--card-bg)');
+    svgPath.setAttribute('stroke-width', '1');
+    return svgPath;
+  };
+
+  sessions.forEach((sess, idx) => {
+    totalStudyH += sess.hrs;
+    const sessionColor = colors[idx % colors.length];
+
+    // OUTER RING: 24-hour clock. 15:00 (3 PM) will now correctly appear 
+    // in the bottom-left quadrant (between 12 and 18).
+    if (temporalRing) {
+      temporalRing.appendChild(getArc(sess.start, sess.hrs, 24, 140, 108, sessionColor));
     }
+
+    // INNER RING: Cumulative goal progress (starts from top 0 and fills up)
+    if (goalRing) {
+      goalRing.appendChild(getArc(cumulativeHrsForGoal, sess.hrs, dailyGoal, 105, 72, sessionColor));
+      cumulativeHrsForGoal += sess.hrs;
+    }
+
+    if (idx > 0) {
+      const prevSess = sessions[idx - 1];
+      const gap = sess.start - (prevSess.start + prevSess.hrs);
+      if (gap > 0) totalBreakM += (gap * 60);
+    }
+  });
+
+  document.getElementById('masterTotalHours').textContent = totalStudyH.toFixed(1) + 'h';
+  document.getElementById('masterGoalPercent').textContent = Math.min(100, Math.round((totalStudyH / dailyGoal) * 100)) + '%';
+  document.getElementById('masterBreak').textContent = Math.round(totalBreakM) + 'm';
+  document.getElementById('masterRest').textContent = (Math.max(0, 24 - totalStudyH)).toFixed(1) + 'h';
+}
+
+
 
     /* ============= TIMER FUNCTIONS ============= */
     function resetTargetDisplay() {
@@ -1346,24 +1460,26 @@ function convertDurationToHours(durationStr) {
       logData("Open", logDuration, "");
     }
 
-    async function logData(type, duration, target) {
-      const sessionData = {
-        type: type,
-        duration: duration,
-        target: target,
-        date: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' }),
-        timestamp: Date.now()
-      };
-      await saveToIndexedDB(sessionData);
-      setTimeout(() => { 
-        loadChartDaily(); loadChartWeekly(); loadChartMonthly();
-        loadPlanner(); loadHeatmap(); loadHourlyDist();
-        loadGoalGauge(); load24HourWatch(); loadMountain(); loadScatter();
-        generateSchedule();
-        loadActualStudySessions(); 
-        loadDailyProgressChart();
-      }, 500);
-    }
+ /* ============= LOG DATA (Fixed to save Local Time) ============= */
+async function logData(type, duration, target) {
+  const now = new Date();
+  
+  // We explicitly store the local hour/minute so it never shifts
+  const sessionData = {
+    type: type,
+    duration: duration,
+    target: target,
+    date: now.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }),
+    // Store the local components directly
+    localHour: now.getHours(),
+    localMin: now.getMinutes(),
+    localSec: now.getSeconds(),
+    timestamp: now.getTime() // Keep for sorting
+  };
+  
+  await saveToIndexedDB(sessionData);
+  setTimeout(refreshAll, 500);
+}
 
     function saveState(type, startTime, targetDuration = null) {
       localStorage.setItem('state_' + type, JSON.stringify({ type, startTime, targetDuration }));
