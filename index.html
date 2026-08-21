@@ -587,10 +587,6 @@ body.theme-sketch {
   </div>
 </div>
 
-<div style="position: fixed; bottom: 20px; left: 20px; z-index: 10000; display: flex; gap: 10px; flex-wrap: wrap;">
-  <button onclick="downloadBackup()" style="padding: 10px; background: #34a853; color: white; border: none; border-radius: 8px; cursor: pointer;">⬇️ Download Backup</button>
-  <button onclick="uploadBackup()" style="padding: 10px; background: #4285f4; color: white; border: none; border-radius: 8px; cursor: pointer;">⬆️ Upload Backup</button>
-</div>
 
 <input type="file" id="backupFileInput" style="display: none;" accept=".json" onchange="processUpload(event)">
 
@@ -746,12 +742,87 @@ body.theme-sketch {
 
 
 
-  <script>
-    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbx5Mii-CC3IVFg7vQgZz6e6OIpEdsvMPrTRmTzYWauV0NUf1u95hc67NT1PayUnThsZ/exec";
+ <script>
     let targetInt, openInt, targetSecs = 0, openSecs = 0, initialTargetSecs = 0;
     let targetEndTime, openStartTime;
 
-    /* ============= GET THEME COLORS (COMPUTED VALUES) ============= */
+    /* ============= INDEXEDDB SETUP ============= */
+    const DB_NAME = 'StudyDashboard';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'sessions';
+
+    async function initIndexedDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+          }
+        };
+      });
+    }
+
+    async function saveToIndexedDB(data) {
+      const db = await initIndexedDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      return new Promise((resolve, reject) => {
+        const request = store.put({...data, timestamp: Date.now()});
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function loadFromIndexedDB() {
+      const db = await initIndexedDB();
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      return new Promise((resolve, reject) => {
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function exportToJSON() {
+      const data = await loadFromIndexedDB();
+      return JSON.stringify(data, null, 2);
+    }
+
+    async function downloadBackup() {
+      const data = await loadFromIndexedDB();
+      const json = JSON.stringify(data, null, 2);
+      const blob = new Blob([json], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `study_backup_${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      alert('✅ Backup downloaded');
+    }
+
+    function uploadBackup() {
+      document.getElementById('backupFileInput').click();
+    }
+
+    async function processUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const db = await initIndexedDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.clear();
+      data.forEach(item => store.put(item));
+      alert('✅ Backup restored');
+      location.reload();
+    }
+
+    /* ============= THEME FUNCTIONS ============= */
     function getThemeColors() {
       const style = getComputedStyle(document.body);
       return {
@@ -764,89 +835,377 @@ body.theme-sketch {
       };
     }
 
-    /* ============= THEME SWITCHING FUNCTION ============= */
     function changeTheme(themeName) {
-      // Remove all theme classes
-     document.body.classList.remove('theme-paper', 'theme-blackboard', 'theme-galaxy', 'theme-forest', 'theme-cyberpunk', 'theme-ocean', 'theme-sketch');
-      
-      // Add selected theme class if not default
+      document.body.classList.remove('theme-paper', 'theme-blackboard', 'theme-galaxy', 'theme-forest', 'theme-cyberpunk', 'theme-ocean', 'theme-sketch');
       if (themeName !== 'default') {
         document.body.classList.add(themeName);
       }
-      
-      // Save preference to localStorage
       localStorage.setItem('selectedTheme', themeName);
-      
-      // Redraw charts with new colors
       setTimeout(() => {
-        loadChartDaily();
-        loadChartWeekly();
-        loadChartMonthly();
-        loadHourlyDist();
-        loadMountain();
-        loadScatter();
-        loadMasterChronometer();
-        loadDailyProgressChart();
+        loadChartDaily(); loadChartWeekly(); loadChartMonthly();
+        loadHourlyDist(); loadMountain(); loadScatter();
+        loadMasterChronometer(); loadDailyProgressChart();
       }, 100);
     }
 
-    /* ============= EXISTING FUNCTIONS (UNCHANGED) ============= */
-
-    function saveGoal() {
-      const newGoal = parseFloat(document.getElementById('goalInput').value);
-      if (newGoal <= 0) { alert('Goal must be greater than 0'); return; }
-      
-      fetch(WEB_APP_URL, {
-        method: "POST",
-        mode: "no-cors",
-        body: JSON.stringify({ action: "setGoal", goal: newGoal })
-      }).then(() => {
-        loadGoalGauge();
-        load24HourWatch();
-        generateSchedule();
-        alert('Goal updated to ' + newGoal + ' hours!');
+    /* ============= DATA FORMATTING ============= */
+    async function formatDataForCharts() {
+      const allSessions = await loadFromIndexedDB();
+      const groupedByDate = {};
+      allSessions.forEach(session => {
+        const date = session.date || new Date(session.timestamp).toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+        if (!groupedByDate[date]) groupedByDate[date] = [];
+        groupedByDate[date].push(session);
       });
+      return groupedByDate;
     }
 
-    window.onload = function() {
-      // Load saved theme preference
-      const savedTheme = localStorage.getItem('selectedTheme') || 'default';
-      document.getElementById('themeSelect').value = savedTheme;
-      changeTheme(savedTheme);
-
-      fetch(`${WEB_APP_URL}?action=getGoal`).then(res => res.json()).then(data => {
-        document.getElementById('goalInput').value = data.goal;
-      }).catch(() => null);
-      
-      fetch(`${WEB_APP_URL}?action=getState`).then(res => res.json()).then(props => restoreSessions(props)).catch(() => null);
-      google.charts.load('current', {packages:['corechart']});
-      google.charts.setOnLoadCallback(() => {
-        loadChartDaily(); loadChartWeekly(); loadChartMonthly(); loadHeatmap(); loadHourlyDist();
-        loadGoalGauge(); load24HourWatch(); loadMountain(); loadScatter();
-        loadMasterChronometer();
-        loadActualStudySessions();
-        loadDailyProgressChart();
+    async function getGoal() {
+      const goal = parseFloat(localStorage.getItem('dailyGoal')) || 4;
+      const sessions = await loadFromIndexedDB();
+      const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+      let todayTotal = 0;
+      sessions.forEach(s => {
+        if (s.date === today && s.type === 'Target') {
+          todayTotal += parseFloat(s.duration) / 60;
+        }
       });
-      loadPlanner();
-      setDefaultEndTime();
-      initCardControls();
-    };
+      return { goal, current: todayTotal };
+    }
 
-  // Enable auto-backup if GitHub configured
-  enableAutoBackup();
+    async function getWatchData() {
+      const sessions = await loadFromIndexedDB();
+      const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+      let watchSessions = [];
+      let hour = 0;
+      sessions.filter(s => s.date === today && s.type === 'Target').forEach((s, i) => {
+        watchSessions.push({
+          start: hour,
+          hrs: parseFloat(s.duration) / 60
+        });
+        hour += parseFloat(s.duration) / 60;
+      });
+      return watchSessions;
+    }
 
-    function restoreSessions(props) {
-      const now = Date.now();
-      if (props.Target_startTime) {
-        let start = parseInt(props.Target_startTime);
-        let duration = parseInt(props.Target_targetDuration);
-        targetEndTime = start + (duration * 1000);
-        initialTargetSecs = duration;
-        if (targetEndTime > now) startTarget(true);
+    async function getDailyData() {
+      const grouped = await formatDataForCharts();
+      const result = [['Date', 'Hours', 'Start Time', 'Notes']];
+      Object.keys(grouped).sort().forEach(date => {
+        const hours = grouped[date].filter(s => s.type === 'Target').reduce((sum, s) => sum + (parseFloat(s.duration) / 60), 0);
+        result.push([date, hours, '', '']);
+      });
+      return result;
+    }
+
+    /* ============= CHART FUNCTIONS ============= */
+    async function loadChart(view, chartDivId) {
+      const themeColors = getThemeColors();
+      const data = await getDailyData();
+      if (data.length <= 1) { 
+        document.getElementById(chartDivId).innerHTML = "No logs."; 
+        return; 
       }
-      if (props.Open_startTime) { openStartTime = parseInt(props.Open_startTime); startOpen(true); }
+
+      let finalData = [];
+      let globalMax = 0;
+      const isMonthly = (view === 'Monthly');
+
+      if (view === 'Daily') {
+        const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+        const grouped = await formatDataForCharts();
+        const todayData = grouped[today] || [];
+        if (todayData.length === 0) { 
+          document.getElementById(chartDivId).innerHTML = "No sessions today."; 
+          return; 
+        }
+        finalData.push(['Session', 'Hours', { role: 'style' }, { role: 'annotation' }]);
+        let sessionCount = 1;
+        todayData.filter(s => s.type === 'Target').forEach(session => {
+          const hrs = parseFloat(session.duration) / 60;
+          const mins = Math.round((hrs % 1) * 60);
+          finalData.push(['S' + sessionCount, hrs, `color: ${themeColors.primary}; fill-opacity: 0.8`, Math.floor(hrs) + "h " + mins + "m"]);
+          if (hrs > globalMax) globalMax = hrs;
+          sessionCount++;
+        });
+      } else {
+        let sliced = isMonthly ? data.slice(-36) : data.slice(-8);
+        let totals = [];
+        sliced.slice(1).forEach(row => {
+          const total = row[1];
+          totals.push(total);
+          if (total > globalMax) globalMax = total;
+        });
+        finalData.push(['Date', 'Base', { role: 'style' }, { role: 'tooltip' }, { role: 'annotation' }]);
+        sliced.slice(1).forEach((row, i) => {
+          finalData.push([row[0], 0.05, 'none', '', totals[i] > 0 ? Math.round(totals[i] * 60) + 'm' : '']);
+        });
+      }
+
+      const chartData = google.visualization.arrayToDataTable(finalData);
+      const options = {
+        isStacked: view !== 'Daily',
+        legend: 'none',
+        backgroundColor: 'transparent',
+        chartArea: { width: '95%', height: '85%', top: 10, bottom: 25 },
+        bar: { groupWidth: isMonthly ? '98%' : '70%' },
+        vAxis: {
+          gridlines: { color: 'transparent' },
+          baselineColor: themeColors.primary,
+          viewWindow: { min: 0, max: globalMax > 0 ? (globalMax * 1.1) : 1 },
+          textPosition: 'none'
+        },
+        hAxis: {
+          textStyle: { fontSize: 8, color: themeColors.primary },
+          baselineColor: 'transparent',
+          gridlines: { color: 'transparent' }
+        },
+        annotations: {
+          alwaysOutside: true,
+          textStyle: { fontSize: 10, bold: true, color: themeColors.primary },
+          stem: { color: 'transparent', length: 0 }
+        },
+        animation: { startup: true, duration: 600, easing: 'out' }
+      };
+      new google.visualization.ColumnChart(document.getElementById(chartDivId)).draw(chartData, options);
     }
 
+    function loadChartDaily() { loadChart('Daily', 'chart_div_daily'); }
+    function loadChartWeekly() { loadChart('Weekly', 'chart_div_weekly'); }
+    function loadChartMonthly() { loadChart('Monthly', 'chart_div_monthly'); }
+
+    async function loadGoalGauge() {
+      const goalData = await getGoal();
+      const percent = Math.min(100, Math.round((goalData.current / goalData.goal) * 100));
+      document.getElementById('goalPercent').innerText = percent;
+    }
+
+    async function load24HourWatch() {
+      const sessions = await getWatchData();
+      let totalStudyH = 0;
+      sessions.forEach(s => { totalStudyH += s.hrs; });
+      document.getElementById('watch24hTotal').innerText = totalStudyH.toFixed(1) + 'h';
+    }
+
+    async function loadHeatmap() {
+      const data = await getDailyData();
+      const stats = {};
+      let totalHours = 0;
+      data.slice(1).forEach(row => {
+        stats[row[0]] = row[1];
+        totalHours += row[1];
+      });
+      const grid = document.getElementById('heatmapGrid');
+      grid.innerHTML = '';
+      const now = new Date();
+      let longest = 0, temp = 0;
+      for (let i = 181; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(now.getDate() - i);
+        const key = d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+        const h = stats[key] || 0;
+        let lvl = h > 5 ? 4 : h > 3 ? 3 : h > 1 ? 2 : h > 0 ? 1 : 0;
+        const el = document.createElement('div');
+        el.className = `heatmap-day lvl-${lvl}`;
+        grid.appendChild(el);
+        if (h > 0) { temp++; } else { if (temp > longest) longest = temp; temp = 0; }
+      }
+      document.getElementById('statAvg').innerText = (totalHours / 182).toFixed(1) + 'h';
+      document.getElementById('statStreak').innerText = temp + 'd';
+      document.getElementById('statLongest').innerText = Math.max(longest, temp) + 'd';
+    }
+
+    async function loadHourlyDist() {
+      const themeColors = getThemeColors();
+      const sessions = await getWatchData();
+      const hourData = [['Hour', 'Sessions']];
+      for (let h = 0; h < 24; h++) {
+        hourData.push([h + ':00', 0]);
+      }
+      sessions.forEach(s => {
+        const hour = Math.floor(s.start);
+        if (hour < 24) hourData[hour + 1][1]++;
+      });
+      const table = google.visualization.arrayToDataTable(hourData);
+      new google.visualization.AreaChart(document.getElementById('hourly_dist_chart')).draw(table, {
+        curveType: 'function', legend: 'none', colors: [themeColors.warning], areaOpacity: 0.1, backgroundColor: 'transparent',
+        chartArea: { width: '90%', height: '80%' }, vAxis: { textPosition: 'none', gridlines: { color: 'transparent' } },
+        hAxis: { textStyle: { fontSize: 8, color: themeColors.warning }, showTextEvery: 6 }
+      });
+    }
+
+    async function loadMountain() {
+      const themeColors = getThemeColors();
+      const data = await getDailyData();
+      const chartData = [['Date', 'Cumulative']];
+      let cumulative = 0;
+      data.slice(1).forEach(row => {
+        cumulative += row[1];
+        chartData.push([row[0], cumulative]);
+      });
+      const table = google.visualization.arrayToDataTable(chartData);
+      new google.visualization.AreaChart(document.getElementById('mountain_chart')).draw(table, {
+        legend: 'none',
+        colors: [themeColors.primary],
+        areaOpacity: 0.05,
+        chartArea: { width: '85%', height: '75%' },
+        vAxis: {
+          title: 'Progress',
+          titleTextStyle: { color: themeColors.primary, fontSize: 11, bold: true, italic: false },
+          textStyle: { color: themeColors.primary, fontSize: 10 },
+          gridlines: { color: 'transparent' }
+        },
+        hAxis: {
+          title: 'Time',
+          titleTextStyle: { color: themeColors.primary, fontSize: 11, bold: true, italic: false },
+          textStyle: { color: themeColors.primary, fontSize: 10 }
+        }
+      });
+    }
+
+    async function loadScatter() {
+      const themeColors = getThemeColors();
+      const goalData = await getGoal();
+      const data = await getDailyData();
+      const chartData = [['Planned', 'Actual']];
+      data.slice(1).forEach(row => {
+        chartData.push([goalData.goal, row[1]]);
+      });
+      const table = google.visualization.arrayToDataTable(chartData);
+      new google.visualization.ScatterChart(document.getElementById('scatter_chart')).draw(table, {
+        legend: 'none', colors: [themeColors.danger], chartArea: { width: '80%', height: '70%' },
+        hAxis: { title: 'Planned', titleTextStyle: { fontSize: 8 } },
+        vAxis: { title: 'Actual', titleTextStyle: { fontSize: 8 } }
+      });
+    }
+
+    async function loadPlanner() {
+      const grouped = await formatDataForCharts();
+      const days = Object.keys(grouped).sort().slice(-7);
+      let html = `<div class="timeline-grid"><div class="time-label-col"><div class="day-header">Hr</div>`;
+      for(let h = 0; h < 24; h++) html += `<div style="height:16px; font-size:9px; color:var(--text-tertiary); text-align:center; line-height:16px; font-weight:600;">${h}h</div>`;
+      html += `</div>`;
+      days.forEach((day, idx) => {
+        html += `<div class="day-col" id="col-${idx}"><div class="day-header">${day.split(' ')[1]}</div>`;
+        for(let h = 0; h < 24; h++) html += `<div style="height:16px; border-bottom:1px dashed var(--border-color); box-sizing:border-box;"></div>`;
+        html += `</div>`;
+      });
+      html += `</div>`;
+      document.getElementById('gridWrapper').innerHTML = html;
+    }
+
+    async function loadActualStudySessions() {
+      const sessions = await getWatchData();
+      const container = document.getElementById('actualContainer');
+      if (sessions.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: var(--text-tertiary); font-size: 12px; padding: 20px;">No sessions logged today yet</div>';
+        document.getElementById('actualTotalHours').innerText = '0.0h';
+        document.getElementById('actualSessionCount').innerText = '0';
+        document.getElementById('actualBreakTime').innerText = '0m';
+        return;
+      }
+      let totalHours = 0;
+      let html = '<div style="font-size: 12px; line-height: 2;">';
+      sessions.forEach((sess, idx) => {
+        totalHours += sess.hrs;
+        const startHour = Math.floor(sess.start);
+        const startTime = startHour.toString().padStart(2, '0') + ':00';
+        const durationHours = Math.floor(sess.hrs);
+        const durationMin = Math.round((sess.hrs % 1) * 60);
+        const durationStr = durationHours > 0 ? `${durationHours}h ${durationMin}m` : `${durationMin}m`;
+        html += `<div style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--input-bg); border-radius: 6px;">
+          <span style="font-weight: 600; color: var(--primary); min-width: 50px;">${startTime}</span>
+          <span style="background: var(--primary); color: white; padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">Study</span>
+          <span style="color: var(--text-secondary); min-width: 70px;">${durationStr}</span>
+        </div>`;
+      });
+      html += '</div>';
+      container.innerHTML = html;
+      document.getElementById('actualTotalHours').innerText = totalHours.toFixed(1) + 'h';
+      document.getElementById('actualSessionCount').innerText = sessions.length;
+      document.getElementById('actualBreakTime').innerText = '0m';
+    }
+
+    async function loadDailyProgressChart() {
+      const themeColors = getThemeColors();
+      const sessions = await getWatchData();
+      const todayByHour = {};
+      sessions.forEach(s => {
+        const hour = Math.floor(s.start);
+        todayByHour[hour] = (todayByHour[hour] || 0) + s.hrs;
+      });
+      let chartData = [['Hour', 'Today', '7-Day Avg']];
+      let lastTodayVal = null;
+      for (let h = 0; h < 24; h++) {
+        const todayVal = todayByHour[h] || lastTodayVal;
+        if (todayVal) lastTodayVal = todayVal;
+        chartData.push([h.toString().padStart(2, '0') + ':00', todayVal, null]);
+      }
+      const table = google.visualization.arrayToDataTable(chartData);
+      new google.visualization.LineChart(document.getElementById('dailyProgressChart')).draw(table, {
+        legend: { position: 'bottom' },
+        pointSize: 4,
+        lineWidth: 2,
+        colors: [themeColors.primary, themeColors.warning],
+        backgroundColor: 'transparent',
+        chartArea: { width: '85%', height: '70%' },
+        hAxis: { textStyle: { fontSize: 10, color: themeColors.warning } },
+        vAxis: { textStyle: { fontSize: 10, color: themeColors.warning } }
+      });
+    }
+
+    async function loadMasterChronometer() {
+      const temporalRing = document.getElementById('masterTemporalRing');
+      const goalRing = document.getElementById('masterGoalRing');
+      const themeColors = getThemeColors();
+      const colors = [themeColors.primary, themeColors.success, themeColors.danger, themeColors.warning, '#8B4513', themeColors.calEvent];
+      const sessions = await getWatchData();
+      const goalData = await getGoal();
+      if (temporalRing) temporalRing.innerHTML = ''; 
+      if (goalRing) goalRing.innerHTML = '';
+      const dailyGoal = goalData.goal || 4;
+      let totalStudyH = 0;
+
+      const getArc = (sVal, dVal, tVal, outR, innR) => {
+        const sA = (sVal / tVal) * 360 - 90, eA = ((sVal + dVal) / tVal) * 360 - 90;
+        const sR = (sA * Math.PI) / 180, eR = (eA * Math.PI) / 180;
+        const large = (dVal / tVal) > 0.5 ? 1 : 0;
+        return `M ${150+outR*Math.cos(sR)} ${150+outR*Math.sin(sR)} A ${outR} ${outR} 0 ${large} 1 ${150+outR*Math.cos(eR)} ${150+outR*Math.sin(eR)} L ${150+innR*Math.cos(eR)} ${150+innR*Math.sin(eR)} A ${innR} ${innR} 0 ${large} 0 ${150+innR*Math.cos(sR)} ${150+innR*Math.sin(sR)} Z`;
+      };
+
+      if (sessions && sessions.length > 0) {
+        let cumulativeHrs = 0;
+        sessions.forEach((sess, idx) => {
+          totalStudyH += sess.hrs;
+          const sessionColor = colors[idx % colors.length];
+          const tPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          tPath.setAttribute('d', getArc(sess.start, sess.hrs, 24, 140, 105.5));
+          tPath.setAttribute('fill', sessionColor);
+          tPath.setAttribute('stroke', 'white');
+          tPath.setAttribute('stroke-width', '0.5');
+          if (temporalRing) temporalRing.appendChild(tPath);
+          const gPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          gPath.setAttribute('d', getArc(cumulativeHrs, sess.hrs, dailyGoal, 104.5, 70));
+          gPath.setAttribute('fill', sessionColor);
+          gPath.setAttribute('stroke', 'white');
+          gPath.setAttribute('stroke-width', '0.5');
+          if (goalRing) goalRing.appendChild(gPath);
+          cumulativeHrs += sess.hrs;
+        });
+      }
+
+      const percent = Math.round((totalStudyH / dailyGoal) * 100);
+      const totalEl = document.getElementById('masterTotalHours');
+      if (totalEl) totalEl.textContent = totalStudyH.toFixed(1) + 'h';
+      const percentEl = document.getElementById('masterGoalPercent');
+      if (percentEl) percentEl.textContent = percent + '%';
+      const breakEl = document.getElementById('masterBreak');
+      if (breakEl) breakEl.textContent = '0m';
+      const restEl = document.getElementById('masterRest');
+      if (restEl) restEl.textContent = totalStudyH.toFixed(1) + 'h';
+    }
+
+    /* ============= TIMER FUNCTIONS ============= */
     function resetTargetDisplay() {
       const mins = document.getElementById('targetMins').value;
       document.getElementById('targetDisplay').innerText = `${mins.toString().padStart(2, '0')}:00`;
@@ -855,25 +1214,21 @@ body.theme-sketch {
     function startTarget(isRestoring = false) {
       if (targetInt) clearInterval(targetInt);
       const minsInput = document.getElementById('targetMins').value;
-      
       if (!isRestoring) {
         initialTargetSecs = minsInput * 60;
         targetEndTime = Date.now() + (initialTargetSecs * 1000);
         saveState("Target", Date.now(), initialTargetSecs);
       }
-      
       toggleButtons('T', true);
       targetInt = setInterval(() => {
         const now = Date.now();
         targetSecs = Math.ceil((targetEndTime - now) / 1000);
-        
         if (targetSecs <= 0) {
           stopTarget();
         } else {
           document.getElementById('targetDisplay').innerText = fmt(targetSecs);
           let progress = ((initialTargetSecs - targetSecs) / initialTargetSecs) * 100;
-          document.getElementById('card-target').style.background = 
-            `linear-gradient(to right, var(--primary) ${progress}%, var(--card-bg) ${progress}%)`;
+          document.getElementById('card-target').style.background = `linear-gradient(to right, var(--primary) ${progress}%, var(--card-bg) ${progress}%)`;
         }
       }, 500);
     }
@@ -895,14 +1250,12 @@ body.theme-sketch {
         openStartTime = Date.now(); 
         saveState("Open", Date.now()); 
       }
-      
       toggleButtons('O', true);
       openInt = setInterval(() => {
         openSecs = Math.floor((Date.now() - openStartTime) / 1000);
         document.getElementById('openDisplay').innerText = fmt(openSecs, true);
         let progress = ((openSecs % 3600) / 3600) * 100;
-        document.getElementById('card-open').style.background = 
-          `linear-gradient(to right, var(--primary) ${progress}%, var(--card-bg) ${progress}%)`;
+        document.getElementById('card-open').style.background = `linear-gradient(to right, var(--primary) ${progress}%, var(--card-bg) ${progress}%)`;
       }, 500);
     }
 
@@ -916,276 +1269,27 @@ body.theme-sketch {
       logData("Open", logDuration, "");
     }
 
+    async function logData(type, duration, target) {
+      const sessionData = {
+        type: type,
+        duration: duration,
+        target: target,
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' }),
+        timestamp: Date.now()
+      };
+      await saveToIndexedDB(sessionData);
+      setTimeout(() => { 
+        loadChartDaily(); loadChartWeekly(); loadChartMonthly();
+        loadPlanner(); loadHeatmap(); loadHourlyDist();
+        loadGoalGauge(); load24HourWatch(); loadMountain(); loadScatter();
+        generateSchedule();
+        loadActualStudySessions(); 
+        loadDailyProgressChart();
+      }, 500);
+    }
+
     function saveState(type, startTime, targetDuration = null) {
-      fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", body: JSON.stringify({ action: "saveState", type, startTime, targetDuration }) });
-    }
-
-    function logData(type, duration, target) {
-      fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", body: JSON.stringify({ type, duration, target }) }).then(() => {
-        setTimeout(() => { 
-          loadChartDaily(); loadChartWeekly(); loadChartMonthly();
-          loadPlanner(); loadHeatmap(); loadHourlyDist();
-          loadGoalGauge(); load24HourWatch(); loadMountain(); loadScatter();
-          generateSchedule();
-          loadActualStudySessions(); 
-          loadDailyProgressChart();
-        }, 1500);
-      });
-    }
-
-    let currentChartView = 'Daily';
-     
-    function loadChartDaily() {
-      loadChart('Daily', 'chart_div_daily');
-    }
-     
-    function loadChartWeekly() {
-      loadChart('Weekly', 'chart_div_weekly');
-    }
-     
-    function loadChartMonthly() {
-      loadChart('Monthly', 'chart_div_monthly');
-    }
-
-    function loadGoalGauge() {
-      const themeColors = getThemeColors();
-      const colors = [themeColors.primary, themeColors.success, themeColors.danger, themeColors.warning, '#8B4513', themeColors.calEvent];
-      
-      Promise.all([
-        fetch(`${WEB_APP_URL}?action=getGoalData`).then(res => res.json()),
-        fetch(`${WEB_APP_URL}?view=Daily`).then(res => res.json())
-      ]).then(([goalData, dailyData]) => {
-        const dailyGoal = goalData.goal;
-        const today = new Date();
-        const todayKey = today.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-        
-        let todayRow = null;
-        if (dailyData.length > 1) {
-          for (let i = dailyData.length - 1; i >= 1; i--) {
-            if (dailyData[i][0] === todayKey) {
-              todayRow = dailyData[i];
-              break;
-            }
-          }
-        }
-        
-        let sessions = [];
-        if (todayRow) {
-          for (let j = 1; j < todayRow.length; j += 3) {
-            const hrs = todayRow[j];
-            if (typeof hrs === 'number' && hrs > 0) sessions.push(hrs);
-          }
-        }
-        
-        const totalStudied = sessions.reduce((a, b) => a + b, 0);
-        const percent = Math.min(100, Math.round((totalStudied / dailyGoal) * 100));
-        document.getElementById('goalPercent').innerText = percent;
-      }).catch(() => {
-        document.getElementById('goalPercent').innerText = '0';
-      });
-    }
-
-    function load24HourWatch() {
-      const segmentsGroup = document.getElementById('hourSegments');
-      
-      fetch(`${WEB_APP_URL}?action=getWatchData`).then(res => res.json()).then(sessions => {
-        segmentsGroup.innerHTML = '';
-        let totalStudyH = 0;
-        let totalBreakM = 0;
-        let totalRestH = 0;
-
-        if (sessions && sessions.length > 0) {
-          sessions.sort((a, b) => a.start - b.start);
-          sessions.forEach((sess, i) => {
-            totalStudyH += sess.hrs;
-            if (i < sessions.length - 1) {
-              let gap = sessions[i+1].start - (sess.start + sess.hrs);
-              if (gap > 0) {
-                if (gap >= 6) totalRestH += gap;
-                else totalBreakM += (gap * 60);
-              }
-            }
-          });
-          let firstGap = sessions[0].start; 
-          let lastGap = 24 - (sessions[sessions.length-1].start + sessions[sessions.length-1].hrs);
-          [firstGap, lastGap].forEach(gap => {
-            if (gap >= 6) totalRestH += gap;
-            else if (gap > 0) totalBreakM += (gap * 60);
-          });
-        }
-
-        document.getElementById('watch24hTotal').innerText = totalStudyH.toFixed(1) + 'h';
-        document.getElementById('statBreak').innerText = Math.round(totalBreakM) + 'm';
-        document.getElementById('statRest').innerText = totalRestH.toFixed(1) + 'h';
-      }).catch(e => console.error("Watch Load Error:", e));
-    }
-     
-    function loadChart(view, chartDivId) {
-      currentChartView = view;
-      const fetchView = (view === 'Weekly' || view === 'Daily') ? 'Daily' : view;
-      const themeColors = getThemeColors();
-     
-      fetch(`${WEB_APP_URL}?view=${fetchView}`).then(res => res.json()).then(rawData => {
-        if (rawData.length <= 1) { document.getElementById(chartDivId).innerHTML = "No logs."; return; }
-     
-        let finalData = [];
-        let globalMax = 0;
-        const isMonthly = (view === 'Monthly');
-
-        if (view === 'Daily') {
-          const today = new Date();
-          const todayKey = today.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-          let todayRow = rawData.find(row => row[0] === todayKey);
-          
-          if (!todayRow) { document.getElementById(chartDivId).innerHTML = "No sessions today."; return; }
-          
-          finalData.push(['Session', 'Hours', { role: 'style' }, { role: 'annotation' }]);
-          let sessionCount = 1;
-          for (let j = 1; j < todayRow.length; j += 3) {
-            let hrs = todayRow[j];
-            if (typeof hrs === 'number' && hrs > 0) {
-              let mins = Math.round(hrs * 60);
-              finalData.push(['S' + sessionCount, hrs, `color: ${themeColors.primary}; fill-opacity: 0.8`, Math.floor(mins/60) + "h " + (mins%60) + "m"]);
-              if (hrs > globalMax) globalMax = hrs;
-              sessionCount++;
-            }
-          }
-        } else {
-          let data = isMonthly ? (rawData.length > 36 ? [rawData[0], ...rawData.slice(-35)] : rawData) 
-                               : (rawData.length > 8 ? [rawData[0], ...rawData.slice(-7)] : rawData);
-          
-          let totals = [];
-          for (let i = 1; i < data.length; i++) {
-            let dailyTotal = 0;
-            for (let j = 1; j < data[i].length; j += 3) { if (typeof data[i][j] === 'number') dailyTotal += data[i][j]; }
-            totals.push(dailyTotal); if (dailyTotal > globalMax) globalMax = dailyTotal;
-          }
-     
-          data[0].splice(1, 0, "Base", { role: "style" }, { role: "tooltip" });
-          data[0].push({ role: "annotation" });
-          
-          for (let i = 1; i < data.length; i++) {
-            let row = data[i], dailyTotal = totals[i - 1];
-            row.splice(1, 0, 0.05, 'none', '');
-            let tm = Math.round(dailyTotal * 60);
-            row.push(isMonthly ? "" : (dailyTotal > 0 ? (Math.floor(tm / 60) + "h " + (tm % 60) + "m") : ""));
-          }
-          finalData = data;
-        }
-     
-        const chartData = google.visualization.arrayToDataTable(finalData);
-        const options = {
-          isStacked: view !== 'Daily',
-          legend: 'none',
-          backgroundColor: 'transparent',
-          chartArea: { width: '95%', height: '85%', top: 10, bottom: 25 },
-          bar: { groupWidth: isMonthly ? '98%' : '70%' }, 
-          vAxis: {
-            gridlines: { color: 'transparent' },
-            baselineColor: themeColors.primary,
-            viewWindow: { min: 0, max: globalMax > 0 ? (globalMax * 1.1) : 1 },
-            textPosition: 'none'
-          },
-          hAxis: {
-            textStyle: { fontSize: 8, color: themeColors.primary },
-            baselineColor: 'transparent',
-            showTextEvery: isMonthly ? 7 : 1,
-            gridlines: { color: 'transparent' }
-          },
-          annotations: {
-            alwaysOutside: true,
-            textStyle: { fontSize: 10, bold: true, color: themeColors.primary },
-            stem: { color: 'transparent', length: 0 }
-          },
-          animation: { startup: true, duration: 600, easing: 'out' }
-        };
-     
-        new google.visualization.ColumnChart(document.getElementById(chartDivId)).draw(chartData, options);
-      });
-    }
-
-    function loadHeatmap() {
-      fetch(`${WEB_APP_URL}?view=Daily`).then(res => res.json()).then(data => {
-          if (data.length <= 1) return;
-          const stats = {}; let totalHours = 0;
-          data.slice(1).forEach(row => { 
-            let ds = 0; for(let j=1; j<row.length; j+=3){ if(typeof row[j]==='number') ds+=row[j]; }
-            stats[row[0]] = ds; totalHours += ds; 
-          });
-          const grid = document.getElementById('heatmapGrid'); grid.innerHTML = '';
-          const now = new Date(); let longest = 0, temp = 0;
-          for (let i = 181; i >= 0; i--) {
-            const d = new Date(); d.setDate(now.getDate() - i);
-            const key = d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-            const h = stats[key] || 0;
-            let lvl = h > 5 ? 4 : h > 3 ? 3 : h > 1 ? 2 : h > 0 ? 1 : 0;
-            const el = document.createElement('div'); el.className = `heatmap-day lvl-${lvl}`; grid.appendChild(el);
-            if (h > 0) { temp++; } else { if (temp > longest) longest = temp; temp = 0; }
-          }
-          document.getElementById('statAvg').innerText = (totalHours / 182).toFixed(1) + 'h';
-          document.getElementById('statStreak').innerText = temp + 'd';
-          document.getElementById('statLongest').innerText = Math.max(longest, temp) + 'd';
-      });
-    }
-
-    function loadHourlyDist() {
-      const themeColors = getThemeColors();
-      fetch(`${WEB_APP_URL}?action=getHourlyDistribution`).then(res => res.json()).then(data => {
-        if (data.length <= 1) return;
-        new google.visualization.AreaChart(document.getElementById('hourly_dist_chart')).draw(google.visualization.arrayToDataTable(data), {
-          curveType: 'function', legend: 'none', colors: [themeColors.warning], areaOpacity: 0.1, backgroundColor: 'transparent',
-          chartArea: { width: '90%', height: '80%' }, vAxis: { textPosition: 'none', gridlines: { color: 'transparent' } },
-          hAxis: { textStyle: { fontSize: 8, color: themeColors.warning }, showTextEvery: 6 }
-        });
-      });
-    }
-
-    function loadMountain() {
-      const themeColors = getThemeColors();
-      fetch(`${WEB_APP_URL}?action=getMountainData`).then(res => res.json()).then(data => {
-        if (data.length <= 1) return;
-        new google.visualization.AreaChart(document.getElementById('mountain_chart')).draw(google.visualization.arrayToDataTable(data), {
-          legend:'none', colors:[themeColors.primary], areaOpacity:0.05, chartArea:{width:'90%', height:'80%'},
-          vAxis:{textPosition:'none', gridlines:{color:'transparent'}}, hAxis:{textPosition:'none'}
-        });
-      });
-    }
-
-    function loadScatter() {
-      const themeColors = getThemeColors();
-      fetch(`${WEB_APP_URL}?action=getScatterData`).then(res => res.json()).then(data => {
-        if (data.length <= 1) return;
-        new google.visualization.ScatterChart(document.getElementById('scatter_chart')).draw(google.visualization.arrayToDataTable(data), {
-          legend:'none', colors:[themeColors.danger], chartArea:{width:'80%', height:'70%'},
-          hAxis:{title:'Planned', titleTextStyle:{fontSize:8}}, vAxis:{title:'Actual', titleTextStyle:{fontSize:8}}
-        });
-      });
-    }
-
-    function loadPlanner() {
-      fetch(`${WEB_APP_URL}?action=getPlannerData`).then(res => res.json()).then(data => {
-          if (!data.days) return;
-          let html = `<div class="timeline-grid"><div class="time-label-col"><div class="day-header">Hr</div>`;
-          for(let h=0; h<24; h++) html += `<div style="height:16px; font-size:9px; color:var(--text-tertiary); text-align:center; line-height:16px; font-weight:600;">${h}h</div>`;
-          html += `</div>`;
-          data.days.forEach((day, idx) => {
-            html += `<div class="day-col" id="col-${idx}"><div class="day-header">${day.split(' ')[1]}</div>`;
-            for(let h=0; h<24; h++) html += `<div style="height:16px; border-bottom:1px dashed var(--border-color); box-sizing:border-box;"></div>`;
-            html += `</div>`;
-          });
-          html += `</div>`;
-          document.getElementById('gridWrapper').innerHTML = html;
-          data.events.forEach(item => {
-            const col = document.getElementById(`col-${item.dayIdx}`);
-            if (col) {
-              const el = document.createElement('div'); el.className = `timeline-block ${item.type}`;
-              el.style.top = `${(item.start * 16) + 35}px`; 
-              el.style.height = `${Math.max(8, (item.end-item.start)*16)}px`;
-              const ft = (d) => { let h=Math.floor(d), m=Math.round((d-h)*60); return h+":"+m.toString().padStart(2,'0'); };
-              el.innerHTML = `<span>${ft(item.start)}</span>`; el.title = item.label; col.appendChild(el);
-            }
-          });
-      });
+      localStorage.setItem('state_' + type, JSON.stringify({ type, startTime, targetDuration }));
     }
 
     function toggleButtons(group, isRunning) {
@@ -1194,9 +1298,20 @@ body.theme-sketch {
     }
 
     function fmt(s, hrs = false) {
-      if (s < 0) s = 0; let h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
+      if (s < 0) s = 0; 
+      let h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
       let res = `${m.toString().padStart(2, '0')}:${sc.toString().padStart(2, '0')}`;
       return hrs ? `${h.toString().padStart(2, '0')}:${res}` : res;
+    }
+
+    /* ============= GOAL & SCHEDULE ============= */
+    function saveGoal() {
+      const newGoal = parseFloat(document.getElementById('goalInput').value);
+      if (newGoal <= 0) { alert('Goal must be greater than 0'); return; }
+      localStorage.setItem('dailyGoal', newGoal);
+      loadGoalGauge();
+      generateSchedule();
+      alert('Goal updated to ' + newGoal + ' hours!');
     }
 
     function setDefaultEndTime() {
@@ -1211,142 +1326,106 @@ body.theme-sketch {
     function recommendSessions(hoursRemaining) {
       let sessionCount, studyDuration, breakDuration;
       if (hoursRemaining < 1) {
-        sessionCount = 1;
-        studyDuration = hoursRemaining;
-        breakDuration = 0;
+        sessionCount = 1; studyDuration = hoursRemaining; breakDuration = 0;
       } else if (hoursRemaining < 2) {
-        sessionCount = 2;
-        studyDuration = hoursRemaining / 2;
-        breakDuration = 0.25;
+        sessionCount = 2; studyDuration = hoursRemaining / 2; breakDuration = 0.25;
       } else if (hoursRemaining < 4) {
-        sessionCount = 3;
-        studyDuration = hoursRemaining / 3;
-        breakDuration = (hoursRemaining < 3) ? 0.25 : 0.33;
+        sessionCount = 3; studyDuration = hoursRemaining / 3; breakDuration = (hoursRemaining < 3) ? 0.25 : 0.33;
       } else if (hoursRemaining < 6) {
-        sessionCount = 4;
-        studyDuration = hoursRemaining / 4;
-        breakDuration = 0.33;
+        sessionCount = 4; studyDuration = hoursRemaining / 4; breakDuration = 0.33;
       } else {
-        sessionCount = 5;
-        studyDuration = hoursRemaining / 5;
-        breakDuration = 0.42;
+        sessionCount = 5; studyDuration = hoursRemaining / 5; breakDuration = 0.42;
       }
       return { sessionCount, studyDuration, breakDuration };
     }
 
-    function generateSchedule() {
+    async function generateSchedule() {
       const endTimeInput = document.getElementById('endTimeInput').value;
       if (!endTimeInput) {
-        document.getElementById('scheduleContainer').innerHTML = 
-          '<div style="text-align: center; color: var(--text-tertiary); font-size: 12px; padding: 20px;">Set an end time to generate schedule</div>';
+        document.getElementById('scheduleContainer').innerHTML = '<div style="text-align: center; color: var(--text-tertiary); font-size: 12px; padding: 20px;">Set an end time to generate schedule</div>';
         return;
       }
 
-      fetch(`${WEB_APP_URL}?action=getGoalData`)
-        .then(res => res.json())
-        .then(data => {
-          const dailyGoal = data.goal;
-          const currentStudied = data.current;
-          const hoursRemaining = Math.max(0, dailyGoal - currentStudied);
+      const goalData = await getGoal();
+      const dailyGoal = goalData.goal;
+      const currentStudied = goalData.current;
+      const hoursRemaining = Math.max(0, dailyGoal - currentStudied);
 
-          const now = new Date();
-          const [endHour, endMin] = endTimeInput.split(':').map(Number);
-          let endTime = new Date(now);
-          endTime.setHours(endHour, endMin, 0);
+      const now = new Date();
+      const [endHour, endMin] = endTimeInput.split(':').map(Number);
+      let endTime = new Date(now);
+      endTime.setHours(endHour, endMin, 0);
+      if (endTime < now) endTime.setDate(endTime.getDate() + 1);
 
-          if (endTime < now) {
-            endTime.setDate(endTime.getDate() + 1);
-          }
+      const timeAvailableMs = endTime - now;
+      const timeAvailableHours = timeAvailableMs / (1000 * 60 * 60);
 
-          const timeAvailableMs = endTime - now;
-          const timeAvailableHours = timeAvailableMs / (1000 * 60 * 60);
+      const recommendation = recommendSessions(hoursRemaining);
+      let { sessionCount, studyDuration } = recommendation;
+      let breakDuration = recommendation.breakDuration;
 
-          const recommendation = recommendSessions(hoursRemaining);
-          let { sessionCount, studyDuration } = recommendation;
-          let breakDuration = recommendation.breakDuration;
+      const totalTimeWithBreaks = (studyDuration * sessionCount) + (breakDuration * (sessionCount - 1));
+      const totalTimeWithoutBreaks = studyDuration * sessionCount;
+      let isFeasible = true;
+      let breaksRemoved = false;
+      let finalEndTime = new Date(endTime);
 
-          const totalTimeWithBreaks = (studyDuration * sessionCount) + (breakDuration * (sessionCount - 1));
-          const totalTimeWithoutBreaks = studyDuration * sessionCount;
-          
-          let isFeasible = true;
-          let breaksRemoved = false;
-          let finalEndTime = new Date(endTime);
+      if (totalTimeWithBreaks > timeAvailableHours) {
+        if (totalTimeWithoutBreaks <= timeAvailableHours) {
+          breakDuration = 0;
+          breaksRemoved = true;
+        } else {
+          const additionalTimeNeeded = totalTimeWithoutBreaks - timeAvailableHours;
+          const additionalMs = additionalTimeNeeded * 60 * 60 * 1000;
+          finalEndTime = new Date(endTime.getTime() + additionalMs);
+          breakDuration = 0;
+          breaksRemoved = true;
+        }
+      }
 
-          if (totalTimeWithBreaks > timeAvailableHours) {
-            if (totalTimeWithoutBreaks <= timeAvailableHours) {
-              breakDuration = 0;
-              breaksRemoved = true;
-            } else {
-              const additionalTimeNeeded = totalTimeWithoutBreaks - timeAvailableHours;
-              const additionalMs = additionalTimeNeeded * 60 * 60 * 1000;
-              finalEndTime = new Date(endTime.getTime() + additionalMs);
-              breakDuration = 0;
-              breaksRemoved = true;
-            }
-          }
+      const schedule = [];
+      let currentTime = new Date(now);
 
-          const schedule = [];
-          let currentTime = new Date(now);
-
-          for (let i = 0; i < sessionCount; i++) {
-            schedule.push({
-              type: 'study',
-              start: new Date(currentTime),
-              duration: studyDuration,
-              label: `Study ${i + 1}`
-            });
-            currentTime.setHours(currentTime.getHours() + Math.floor(studyDuration));
-            currentTime.setMinutes(currentTime.getMinutes() + Math.round((studyDuration % 1) * 60));
-
-            if (i < sessionCount - 1 && breakDuration > 0) {
-              schedule.push({
-                type: 'break',
-                start: new Date(currentTime),
-                duration: breakDuration,
-                label: `Break`
-              });
-              currentTime.setHours(currentTime.getHours() + Math.floor(breakDuration));
-              currentTime.setMinutes(currentTime.getMinutes() + Math.round((breakDuration % 1) * 60));
-            }
-          }
-
-          const scheduleEndsAt = new Date(currentTime);
-          const bufferMs = finalEndTime - scheduleEndsAt;
-          const bufferMinutes = Math.round(bufferMs / (1000 * 60));
-          const isTight = bufferMinutes < 30;
-          const endTimeExtended = finalEndTime > endTime;
-
-          renderSchedule(schedule, hoursRemaining, sessionCount, studyDuration, breakDuration, isFeasible, isTight, bufferMinutes, now, finalEndTime, breaksRemoved, endTimeExtended);
-        })
-        .catch(err => {
-          document.getElementById('scheduleContainer').innerHTML = 
-            '<div style="text-align: center; color: var(--danger); font-size: 12px; padding: 20px;">Error loading goal data</div>';
+      for (let i = 0; i < sessionCount; i++) {
+        schedule.push({
+          type: 'study',
+          start: new Date(currentTime),
+          duration: studyDuration,
+          label: `Study ${i + 1}`
         });
+        currentTime.setHours(currentTime.getHours() + Math.floor(studyDuration));
+        currentTime.setMinutes(currentTime.getMinutes() + Math.round((studyDuration % 1) * 60));
+
+        if (i < sessionCount - 1 && breakDuration > 0) {
+          schedule.push({
+            type: 'break',
+            start: new Date(currentTime),
+            duration: breakDuration,
+            label: `Break`
+          });
+          currentTime.setHours(currentTime.getHours() + Math.floor(breakDuration));
+          currentTime.setMinutes(currentTime.getMinutes() + Math.round((breakDuration % 1) * 60));
+        }
+      }
+
+      const scheduleEndsAt = new Date(currentTime);
+      const bufferMs = finalEndTime - scheduleEndsAt;
+      const bufferMinutes = Math.round(bufferMs / (1000 * 60));
+      const isTight = bufferMinutes < 30;
+      const endTimeExtended = finalEndTime > endTime;
+
+      renderSchedule(schedule, hoursRemaining, sessionCount, studyDuration, breakDuration, isFeasible, isTight, bufferMinutes, now, finalEndTime, breaksRemoved, endTimeExtended);
     }
 
     function renderSchedule(schedule, hoursRemaining, sessionCount, studyDuration, breakDuration, isFeasible, isTight, bufferMinutes, startTime, endTime, breaksRemoved, endTimeExtended) {
-      let html = '';
-      html += `
-        <div class="schedule-info">
-          <strong>${hoursRemaining.toFixed(1)}h</strong> remaining to meet your ${(parseFloat(document.getElementById('goalInput').value)).toFixed(1)}h goal<br>
-          <strong>Recommended:</strong> ${sessionCount} sessions
-        </div>
-      `;
+      let html = `<div class="schedule-info"><strong>${hoursRemaining.toFixed(1)}h</strong> remaining to meet your ${(parseFloat(document.getElementById('goalInput').value)).toFixed(1)}h goal<br><strong>Recommended:</strong> ${sessionCount} sessions</div>`;
 
       if (breaksRemoved && !endTimeExtended) {
-        html += `
-          <div style="background: var(--input-bg); border-left: 4px solid var(--warning); padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; color: var(--warning);">
-            <strong>⚠️ Breaks removed</strong> to fit goal within end time
-          </div>
-        `;
+        html += `<div style="background: var(--input-bg); border-left: 4px solid var(--warning); padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; color: var(--warning);"><strong>⚠️ Breaks removed</strong> to fit goal within end time</div>`;
       }
 
       if (endTimeExtended) {
-        html += `
-          <div style="background: var(--input-bg); border-left: 4px solid var(--danger); padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; color: var(--danger);">
-            <strong>❌ End time extended</strong> — goal requires more time even with 0 breaks
-          </div>
-        `;
+        html += `<div style="background: var(--input-bg); border-left: 4px solid var(--danger); padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; color: var(--danger);"><strong>❌ End time extended</strong> — goal requires more time even with 0 breaks</div>`;
       }
 
       let currentTime = new Date(startTime);
@@ -1355,32 +1434,22 @@ body.theme-sketch {
       
       while (i < schedule.length) {
         const item = schedule[i];
-        
         if (item.type === 'study') {
           const studyHours = Math.floor(item.duration);
           const studyMinutes = Math.round((item.duration % 1) * 60);
           const studyDurationStr = studyHours > 0 ? `${studyHours}h ${studyMinutes}m` : `${studyMinutes}m`;
           const startStr = `${currentTime.getHours().toString().padStart(2, '0')}:${currentTime.getMinutes().toString().padStart(2, '0')}`;
-          
           const studyEndTime = new Date(currentTime);
           studyEndTime.setHours(studyEndTime.getHours() + studyHours);
           studyEndTime.setMinutes(studyEndTime.getMinutes() + studyMinutes);
-          
-          html += `<div class="schedule-row">`;
-          html += `<span style="font-weight: 600; color: var(--primary); min-width: 60px;">${startStr}</span>`;
-          html += `<span class="schedule-block schedule-study">Study ${sessionNum}</span>`;
-          html += `<span style="color: var(--text-secondary);">${studyDurationStr}</span>`;
+          html += `<div class="schedule-row"><span style="font-weight: 600; color: var(--primary); min-width: 60px;">${startStr}</span><span class="schedule-block schedule-study">Study ${sessionNum}</span><span style="color: var(--text-secondary);">${studyDurationStr}</span>`;
           
           if (i + 1 < schedule.length && schedule[i + 1].type === 'break') {
             const breakItem = schedule[i + 1];
             const breakHours = Math.floor(breakItem.duration);
             const breakMinutes = Math.round((breakItem.duration % 1) * 60);
             const breakDurationStr = breakHours > 0 ? `${breakHours}h ${breakMinutes}m` : `${breakMinutes}m`;
-            
-            html += `<span style="color: var(--text-tertiary); margin: 0 4px;">→</span>`;
-            html += `<span class="schedule-block schedule-break">Break</span>`;
-            html += `<span style="color: var(--text-tertiary);">${breakDurationStr}</span>`;
-            
+            html += `<span style="color: var(--text-tertiary); margin: 0 4px;">→</span><span class="schedule-block schedule-break">Break</span><span style="color: var(--text-tertiary);">${breakDurationStr}</span>`;
             const breakEndTime = new Date(studyEndTime);
             breakEndTime.setHours(breakEndTime.getHours() + breakHours);
             breakEndTime.setMinutes(breakEndTime.getMinutes() + breakMinutes);
@@ -1390,7 +1459,6 @@ body.theme-sketch {
             currentTime = new Date(studyEndTime);
             i++;
           }
-          
           html += `</div>`;
           sessionNum++;
         } else {
@@ -1406,295 +1474,11 @@ body.theme-sketch {
         html += `<div class="feasibility-badge feasibility-bad">❌ Not achievable in time</div>`;
       }
 
-      html += `
-        <p style="font-size: 11px; color: var(--text-tertiary); margin-top: 12px; text-align: center;">
-          💡 Based on ultradian rhythm & focus cycles
-        </p>
-      `;
-
+      html += `<p style="font-size: 11px; color: var(--text-tertiary); margin-top: 12px; text-align: center;">💡 Based on ultradian rhythm & focus cycles</p>`;
       document.getElementById('scheduleContainer').innerHTML = html;
     }
 
-    function loadMasterChronometer() {
-        const temporalRing = document.getElementById('masterTemporalRing');
-        const goalRing = document.getElementById('masterGoalRing');
-        const themeColors = getThemeColors();
-        const colors = [themeColors.primary, themeColors.success, themeColors.danger, themeColors.warning, '#8B4513', themeColors.calEvent];
-
-        Promise.all([
-            fetch(`${WEB_APP_URL}?action=getWatchData`).then(res => res.json()),
-            fetch(`${WEB_APP_URL}?action=getGoalData`).then(res => res.json())
-        ]).then(([sessions, goalData]) => {
-            if (temporalRing) temporalRing.innerHTML = ''; 
-            if (goalRing) goalRing.innerHTML = '';
-            
-            const dailyGoal = goalData.goal || 4;
-            let totalStudyH = 0; 
-            let totalBreakM = 0; 
-            let totalRestH = 0;
-
-            const getArc = (sVal, dVal, tVal, outR, innR) => {
-                const sA = (sVal / tVal) * 360 - 90, eA = ((sVal + dVal) / tVal) * 360 - 90;
-                const sR = (sA * Math.PI) / 180, eR = (eA * Math.PI) / 180;
-                const large = (dVal / tVal) > 0.5 ? 1 : 0;
-                return `M ${150+outR*Math.cos(sR)} ${150+outR*Math.sin(sR)} 
-                        A ${outR} ${outR} 0 ${large} 1 ${150+outR*Math.cos(eR)} ${150+outR*Math.sin(eR)} 
-                        L ${150+innR*Math.cos(eR)} ${150+innR*Math.sin(eR)} 
-                        A ${innR} ${innR} 0 ${large} 0 ${150+innR*Math.cos(sR)} ${150+innR*Math.sin(sR)} Z`;
-            };
-
-            if (sessions && sessions.length > 0) {
-                sessions.sort((a, b) => a.start - b.start);
-                let cumulativeHrs = 0;
-
-                sessions.forEach((sess, idx) => {
-                    totalStudyH += sess.hrs;
-                    const sessionColor = colors[idx % colors.length];
-
-                    const tPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                    tPath.setAttribute('d', getArc(sess.start, sess.hrs, 24, 140, 105.5));
-                    tPath.setAttribute('fill', sessionColor);
-                    tPath.setAttribute('stroke', 'white');
-                    tPath.setAttribute('stroke-width', '0.5');
-                    if (temporalRing) temporalRing.appendChild(tPath);
-
-                    const gPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                    gPath.setAttribute('d', getArc(cumulativeHrs, sess.hrs, dailyGoal, 104.5, 70));
-                    gPath.setAttribute('fill', sessionColor);
-                    gPath.setAttribute('stroke', 'white');
-                    gPath.setAttribute('stroke-width', '0.5');
-                    if (goalRing) goalRing.appendChild(gPath);
-                    
-                    cumulativeHrs += sess.hrs;
-
-                    if (idx < sessions.length - 1) {
-                        let gap = sessions[idx+1].start - (sess.start + sess.hrs);
-                        if (gap > 0) {
-                            if (gap >= 6) totalRestH += gap;
-                            else totalBreakM += (gap * 60);
-                        }
-                    }
-                });
-
-                let firstGap = sessions[0].start; 
-                let lastGap = 24 - (sessions[sessions.length-1].start + sessions[sessions.length-1].hrs);
-                [firstGap, lastGap].forEach(gap => {
-                    if (gap > 0) {
-                        if (gap >= 6) totalRestH += gap;
-                        else totalBreakM += (gap * 60);
-                    }
-                });
-            }
-
-            const percent = Math.round((totalStudyH / dailyGoal) * 100);
-            const totalEl = document.getElementById('masterTotalHours');
-            if (totalEl) totalEl.textContent = totalStudyH.toFixed(1) + 'h';
-            const percentEl = document.getElementById('masterGoalPercent');
-            if (percentEl) percentEl.textContent = percent + '%';
-            const breakEl = document.getElementById('masterBreak');
-            if (breakEl) breakEl.textContent = Math.round(totalBreakM) + 'm';
-            const restEl = document.getElementById('masterRest');
-            if (restEl) restEl.textContent = totalRestH.toFixed(1) + 'h';
-
-        }).catch(e => console.error("Chronometer Update Error:", e));
-    }
-
-    function loadActualStudySessions() {
-      fetch(`${WEB_APP_URL}?action=getWatchData`).then(res => res.json()).then(sessions => {
-        const container = document.getElementById('actualContainer');
-        
-        if (!sessions || sessions.length === 0) {
-          container.innerHTML = '<div style="text-align: center; color: var(--text-tertiary); font-size: 12px; padding: 20px;">No sessions logged today yet</div>';
-          document.getElementById('actualTotalHours').innerText = '0.0h';
-          document.getElementById('actualSessionCount').innerText = '0';
-          document.getElementById('actualBreakTime').innerText = '0m';
-          return;
-        }
-
-        sessions.sort((a, b) => a.start - b.start);
-
-        let totalHours = 0;
-        let totalBreakMinutes = 0;
-        let html = '<div style="font-size: 12px; line-height: 2;">';
-
-        sessions.forEach((sess, idx) => {
-          totalHours += sess.hrs;
-
-          const startHour = Math.floor(sess.start);
-          const startMin = Math.round((sess.start % 1) * 60);
-          const startTime = `${startHour.toString().padStart(2, '0')}:${startMin.toString().padStart(2, '0')}`;
-          
-          const durationHours = Math.floor(sess.hrs);
-          const durationMin = Math.round((sess.hrs % 1) * 60);
-          const durationStr = durationHours > 0 ? `${durationHours}h ${durationMin}m` : `${durationMin}m`;
-
-          html += `
-            <div style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--input-bg); border-radius: 6px;">
-              <span style="font-weight: 600; color: var(--primary); min-width: 50px;">${startTime}</span>
-              <span style="background: var(--primary); color: white; padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">Study</span>
-              <span style="color: var(--text-secondary); min-width: 70px;">${durationStr}</span>
-          `;
-
-          if (idx < sessions.length - 1) {
-            const gap = sessions[idx + 1].start - (sess.start + sess.hrs);
-            if (gap > 0) {
-              const breakMin = Math.round(gap * 60);
-              totalBreakMinutes += breakMin;
-              html += `
-                <span style="color: var(--text-tertiary); margin: 0 4px;">→</span>
-                <span style="background: var(--warning); color: white; padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">Break</span>
-                <span style="color: var(--warning); font-weight: 600;">${breakMin}m</span>
-              `;
-            }
-          }
-
-          html += `</div>`;
-        });
-
-        html += '</div>';
-        container.innerHTML = html;
-        
-        document.getElementById('actualTotalHours').innerText = totalHours.toFixed(1) + 'h';
-        document.getElementById('actualSessionCount').innerText = sessions.length;
-        document.getElementById('actualBreakTime').innerText = Math.round(totalBreakMinutes) + 'm';
-      }).catch(err => {
-        document.getElementById('actualContainer').innerHTML = '<div style="text-align: center; color: var(--danger); font-size: 12px; padding: 20px;">Error loading sessions</div>';
-      });
-    }
-
-    function loadDailyProgressChart() {
-      const themeColors = getThemeColors();
-      Promise.all([
-        fetch(`${WEB_APP_URL}?action=getWatchData`).then(res => res.json()),
-        fetch(`${WEB_APP_URL}?view=Daily`).then(res => res.json())
-      ]).then(([todayWatch, allData]) => {
-        if (!allData || allData.length <= 1) return;
-
-        const today = new Date();
-        const todayKey = today.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-        
-        let todayByHour = {};
-        let todayStartHour = 24;
-        
-        if (todayWatch && todayWatch.length > 0) {
-          todayWatch.sort((a, b) => a.start - b.start);
-          let cumulativeHours = 0;
-          
-          todayWatch.forEach(sess => {
-            const startHour = Math.floor(sess.start);
-            if (startHour < todayStartHour) todayStartHour = startHour;
-            
-            cumulativeHours += sess.hrs;
-            const endHour = Math.ceil(sess.start + sess.hrs);
-            
-            for (let h = startHour; h < endHour && h < 24; h++) {
-              if (!todayByHour[h] || todayByHour[h] < cumulativeHours) {
-                todayByHour[h] = cumulativeHours;
-              }
-            }
-          });
-        }
-
-        let pastByHour = {};
-        let pastStartHour = 24;
-        let pastDaysCount = 0;
-
-        const recentRows = allData.slice(-8).slice(0, -1);
-        if (recentRows.length > 0) {
-          pastDaysCount = recentRows.length;
-          let dailyCumulatives = [];
-          
-          recentRows.forEach(row => {
-            let dayCumulative = {};
-            let sessionsList = [];
-            for (let j = 1; j < row.length; j += 3) {
-              const hrs = row[j];
-              if (typeof hrs === 'number' && hrs > 0) {
-                sessionsList.push(hrs);
-              }
-            }
-            
-            if (sessionsList.length > 0) {
-              let cumulativeHours = 0;
-              let currentHour = 9;
-              
-              sessionsList.forEach(hrs => {
-                cumulativeHours += hrs;
-                const startHour = Math.floor(currentHour);
-                const endHour = Math.ceil(currentHour + hrs);
-                
-                if (startHour < pastStartHour) pastStartHour = startHour;
-                
-                for (let h = startHour; h < endHour && h < 24; h++) {
-                  if (!dayCumulative[h] || dayCumulative[h] < cumulativeHours) {
-                    dayCumulative[h] = cumulativeHours;
-                  }
-                }
-                currentHour = endHour;
-              });
-            }
-            dailyCumulatives.push(dayCumulative);
-          });
-          
-          for (let h = pastStartHour; h < 24; h++) {
-            let sum = 0;
-            let count = 0;
-            dailyCumulatives.forEach(dayCum => {
-              if (dayCum[h] !== undefined) {
-                sum += dayCum[h];
-                count++;
-              }
-            });
-            if (count > 0) {
-              pastByHour[h] = sum / count;
-            }
-          }
-          
-          let lastVal = 0;
-          for (let h = pastStartHour; h < 24; h++) {
-            if (pastByHour[h] !== undefined) {
-              if (pastByHour[h] < lastVal) pastByHour[h] = lastVal;
-              lastVal = pastByHour[h];
-            }
-          }
-        }
-
-        const startHour = Math.min(todayStartHour, pastStartHour);
-        const endHour = 24;
-        
-        // NEW CODE - Fills gaps for continuous line
-let chartData = [['Hour', 'Today', '7-Day Avg']];
-let lastTodayVal = null;
-let lastAvgVal = null;
-
-for (let h = startHour; h < endHour; h++) {
-  const hourLabel = h.toString().padStart(2, '0') + ':00';
-  const todayVal = todayByHour[h] !== undefined ? todayByHour[h] : lastTodayVal;
-  const avgVal = pastByHour[h] ? parseFloat(pastByHour[h].toFixed(2)) : lastAvgVal;
-  
-  // Update last known values for gap filling
-  if (todayVal !== null) lastTodayVal = todayVal;
-  if (avgVal !== null) lastAvgVal = avgVal;
-  
-  chartData.push([hourLabel, todayVal, avgVal]);
-}
-
-        const table = google.visualization.arrayToDataTable(chartData);
-        const options = {
-          legend: { position: 'bottom' },
-          pointSize: 4,
-          lineWidth: 2,
-          colors: [themeColors.primary, themeColors.warning],
-          backgroundColor: 'transparent',
-          chartArea: { width: '85%', height: '70%' },
-          hAxis: { textStyle: { fontSize: 10, color: themeColors.warning } },
-          vAxis: { textStyle: { fontSize: 10, color: themeColors.warning } }
-        };
-
-        new google.visualization.LineChart(document.getElementById('dailyProgressChart')).draw(table, options);
-      });
-    }
-
+    /* ============= CARD CONTROLS ============= */
     function initCardControls() {
       const hiddenCards = JSON.parse(localStorage.getItem('hiddenCards')) || [];
       hiddenCards.forEach(id => {
@@ -1703,12 +1487,10 @@ for (let h = startHour; h < endHour; h++) {
 
       document.querySelectorAll('.card').forEach((card, idx) => {
         if (!card.id) card.id = 'card-' + idx;
-        
         const h3 = card.querySelector('h3');
         if (h3) {
           const header = document.createElement('div');
           header.className = 'card-header';
-          
           const title = h3.cloneNode(true);
           const hideBtn = document.createElement('button');
           hideBtn.className = 'btn-hide';
@@ -1717,7 +1499,6 @@ for (let h = startHour; h < endHour; h++) {
             e.stopPropagation();
             toggleCardVisibility(card.id);
           };
-          
           header.appendChild(title);
           header.appendChild(hideBtn);
           h3.replaceWith(header);
@@ -1728,7 +1509,6 @@ for (let h = startHour; h < endHour; h++) {
           e.dataTransfer.effectAllowed = 'move';
           card.classList.add('dragging');
         });
-        
         card.addEventListener('dragend', () => {
           card.classList.remove('dragging');
         });
@@ -1744,7 +1524,6 @@ for (let h = startHour; h < endHour; h++) {
         e.preventDefault();
         const dragging = document.querySelector('.card.dragging');
         const afterElement = getDragAfterElement(container, e.clientY);
-        
         if (afterElement == null) {
           container.appendChild(dragging);
         } else {
@@ -1756,7 +1535,6 @@ for (let h = startHour; h < endHour; h++) {
     function toggleCardVisibility(cardId) {
       const card = document.getElementById(cardId);
       card.classList.toggle('hidden');
-      
       let hiddenCards = JSON.parse(localStorage.getItem('hiddenCards')) || [];
       if (card.classList.contains('hidden')) {
         if (!hiddenCards.includes(cardId)) hiddenCards.push(cardId);
@@ -1779,193 +1557,51 @@ for (let h = startHour; h < endHour; h++) {
       }, { offset: Number.NEGATIVE_INFINITY }).element;
     }
 
-/* ============= INDEXEDDB + GITHUB BACKUP ============= */
-
-const DB_NAME = 'StudyDashboard';
-const DB_VERSION = 1;
-const STORE_NAME = 'sessions';
-
-// GitHub config - user needs to set this
-let GITHUB_CONFIG = {
-  token: localStorage.getItem('githubToken') || '',
-  owner: localStorage.getItem('githubOwner') || '',
-  repo: localStorage.getItem('githubRepo') || '',
-  branch: 'main'
-};
-
-// Initialize IndexedDB
-function initIndexedDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+    async function restoreSessions(props) {
+      const now = Date.now();
+      const targetState = localStorage.getItem('state_Target');
+      const openState = localStorage.getItem('state_Open');
+      if (targetState) {
+        const state = JSON.parse(targetState);
+        let start = parseInt(state.startTime);
+        let duration = parseInt(state.targetDuration);
+        targetEndTime = start + (duration * 1000);
+        initialTargetSecs = duration;
+        if (targetEndTime > now) startTarget(true);
       }
-    };
-  });
-}
-
-// Save to IndexedDB
-async function saveToIndexedDB(data) {
-  const db = await initIndexedDB();
-  const tx = db.transaction(STORE_NAME, 'readwrite');
-  const store = tx.objectStore(STORE_NAME);
-  return new Promise((resolve, reject) => {
-    const request = store.put({...data, timestamp: Date.now()});
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// Load all from IndexedDB
-async function loadFromIndexedDB() {
-  const db = await initIndexedDB();
-  const tx = db.transaction(STORE_NAME, 'readonly');
-  const store = tx.objectStore(STORE_NAME);
-  return new Promise((resolve, reject) => {
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// Export to JSON
-async function exportToJSON() {
-  const data = await loadFromIndexedDB();
-  return JSON.stringify(data, null, 2);
-}
-
-// Setup GitHub
-function setupGitHub(token, owner, repo) {
-  GITHUB_CONFIG = {token, owner, repo, branch: 'main'};
-  localStorage.setItem('githubToken', token);
-  localStorage.setItem('githubOwner', owner);
-  localStorage.setItem('githubRepo', repo);
-  alert('GitHub backup configured!');
-}
-
-// Backup to GitHub
-async function backupToGitHub() {
-  if (!GITHUB_CONFIG.token || !GITHUB_CONFIG.owner || !GITHUB_CONFIG.repo) {
-    alert('GitHub not configured. Use setupGitHub() first.');
-    return false;
-  }
-  
-  const data = await exportToJSON();
-  const fileName = `study_backup_${new Date().toISOString().split('T')[0]}.json`;
-  
-  try {
-    const response = await fetch(
-      `https://api.github.com/repos/${GITHUB_CONFIG.owner}/${GITHUB_CONFIG.repo}/contents/${fileName}`,
-      {
-        method: 'PUT',
-        headers: {
-          'Authorization': `token ${GITHUB_CONFIG.token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          message: `Study session backup - ${new Date().toLocaleString()}`,
-          content: btoa(data),
-          branch: GITHUB_CONFIG.branch
-        })
+      if (openState) {
+        const state = JSON.parse(openState);
+        openStartTime = parseInt(state.startTime);
+        startOpen(true);
       }
-    );
-    
-    if (response.ok) {
-      console.log('✅ Backup to GitHub successful');
-      return true;
-    } else {
-      throw new Error(await response.text());
     }
-  } catch (error) {
-    console.error('❌ GitHub backup failed:', error);
-    return false;
-  }
-}
 
-// Restore from GitHub
-async function restoreFromGitHub(fileName) {
-  if (!GITHUB_CONFIG.token || !GITHUB_CONFIG.owner || !GITHUB_CONFIG.repo) {
-    alert('GitHub not configured.');
-    return false;
-  }
-  
-  try {
-    const response = await fetch(
-      `https://api.github.com/repos/${GITHUB_CONFIG.owner}/${GITHUB_CONFIG.repo}/contents/${fileName}`,
-      {
-        headers: {'Authorization': `token ${GITHUB_CONFIG.token}`}
-      }
-    );
-    
-    const data = await response.json();
-    const content = JSON.parse(atob(data.content));
-    
-    const db = await initIndexedDB();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    store.clear();
-    
-    content.forEach(item => store.put(item));
-    
-    console.log('✅ Restored from GitHub');
-    return true;
-  } catch (error) {
-    console.error('❌ Restore failed:', error);
-    return false;
-  }
-}
+    window.onload = function() {
+      const savedTheme = localStorage.getItem('selectedTheme') || 'default';
+      document.getElementById('themeSelect').value = savedTheme;
+      changeTheme(savedTheme);
 
-// Auto-backup every 24 hours
-function enableAutoBackup() {
-  setInterval(() => {
-    if (GITHUB_CONFIG.token) backupToGitHub();
-  }, 24 * 60 * 60 * 1000);
-}
-    
-// Download backup as JSON
-async function downloadBackup() {
-  const data = await loadFromIndexedDB();
-  const json = JSON.stringify(data, null, 2);
-  const blob = new Blob([json], {type: 'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `study_backup_${new Date().toISOString().split('T')[0]}.json`;
-  a.click();
-  alert('✅ Backup downloaded');
-}
-
-// Trigger file upload
-function uploadBackup() {
-  document.getElementById('backupFileInput').click();
-}
-
-// Process uploaded backup
-async function processUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  
-  const text = await file.text();
-  const data = JSON.parse(text);
-  
-  const db = await initIndexedDB();
-  const tx = db.transaction(STORE_NAME, 'readwrite');
-  const store = tx.objectStore(STORE_NAME);
-  store.clear();
-  
-  data.forEach(item => store.put(item));
-  alert('✅ Backup restored');
-  
-  // Reload charts
-  location.reload();
-}
-
+      const savedGoal = localStorage.getItem('dailyGoal') || 4;
+      document.getElementById('goalInput').value = savedGoal;
+      
+      restoreSessions({});
+      google.charts.load('current', {packages:['corechart']});
+      google.charts.setOnLoadCallback(() => {
+        loadChartDaily(); loadChartWeekly(); loadChartMonthly(); loadHeatmap(); loadHourlyDist();
+        loadGoalGauge(); load24HourWatch(); loadMountain(); loadScatter();
+        loadMasterChronometer(); loadActualStudySessions(); loadDailyProgressChart();
+      });
+      loadPlanner();
+      setDefaultEndTime();
+      initCardControls();
+    };
   </script>
+
+<input type="file" id="backupFileInput" style="display: none;" accept=".json" onchange="processUpload(event)">
+
+<div style="position: fixed; bottom: 20px; left: 20px; z-index: 10000; display: flex; gap: 10px; flex-wrap: wrap;">
+  <button onclick="downloadBackup()" style="padding: 10px; background: #34a853; color: white; border: none; border-radius: 8px; cursor: pointer;">⬇️ Download Backup</button>
+  <button onclick="uploadBackup()" style="padding: 10px; background: #4285f4; color: white; border: none; border-radius: 8px; cursor: pointer;">⬆️ Upload Backup</button>
+</div>
 </body>
 </html>
