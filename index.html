@@ -919,30 +919,61 @@ body.theme-sketch {
       return { goal, current: todayTotal };
     }
 
-    async function getWatchData() {
-      const sessions = await loadFromIndexedDB();
-      const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-      let watchSessions = [];
-      let hour = 0;
-      sessions.filter(s => s.date === today && s.type === 'Target').forEach((s, i) => {
-        watchSessions.push({
-          start: hour,
-          hrs: parseFloat(s.duration) / 60
-        });
-        hour += parseFloat(s.duration) / 60;
-      });
-      return watchSessions;
-    }
+   async function getWatchData() {
+  const sessions = await loadFromIndexedDB();
+  const today = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+  
+  let watchSessions = [];
+  let hour = 0;
+  
+  sessions.filter(s => s.date === today && (s.type === 'Target' || s.type === 'Open')).forEach((s, i) => {
+    const hrs = convertDurationToHours(s.duration);
+    watchSessions.push({
+      start: hour,
+      hrs: hrs
+    });
+    hour += hrs;
+  });
+  
+  return watchSessions;
+}
 
     async function getDailyData() {
-      const grouped = await formatDataForCharts();
-      const result = [['Date', 'Hours', 'Start Time', 'Notes']];
-      Object.keys(grouped).sort().forEach(date => {
-        const hours = grouped[date].filter(s => s.type === 'Target').reduce((sum, s) => sum + (parseFloat(s.duration) / 60), 0);
-        result.push([date, hours, '', '']);
-      });
-      return result;
+  const grouped = await formatDataForCharts();
+  const result = [['Date', 'Hours', 'Start Time', 'Notes']];
+  
+  Object.keys(grouped).sort().forEach(date => {
+    const hours = grouped[date]
+      .filter(s => s.type === 'Target' || s.type === 'Open')
+      .reduce((sum, s) => {
+        const durationHours = convertDurationToHours(s.duration);
+        return sum + durationHours;
+      }, 0);
+    result.push([date, hours, '', '']);
+  });
+  
+  return result;
+}
+
+function convertDurationToHours(durationStr) {
+  if (!durationStr || typeof durationStr !== 'string') return 0;
+  
+  // Logic: Check for colon format (HH:MM:SS or MM:SS)
+  if (durationStr.includes(':')) {
+    const parts = durationStr.split(':').map(p => parseFloat(p) || 0);
+    if (parts.length === 3) {
+      // It is HH:MM:SS
+      return parts[0] + (parts[1] / 60) + (parts[2] / 3600);
+    } else if (parts.length === 2) {
+      // It is MM:SS
+      return (parts[0] / 60) + (parts[1] / 3600);
     }
+  }
+  
+  // Logic: Fallback for single numbers (treated as minutes)
+  const mins = parseFloat(durationStr);
+  return isNaN(mins) ? 0 : mins / 60;
+}
 
     /* ============= CHART FUNCTIONS ============= */
     async function loadChart(view, chartDivId) {
