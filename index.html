@@ -808,7 +808,7 @@ body.theme-sketch {
       document.getElementById('backupFileInput').click();
     }
 
-   async function processUpload(event) {
+ async function processUpload(event) {
   const file = event.target.files[0];
   if (!file) return;
   
@@ -826,11 +826,17 @@ body.theme-sketch {
     const store = tx.objectStore(STORE_NAME);
     store.clear();
     
-    data.forEach(item => {
-      if (!item.date && item.timestamp) {
-        item.date = new Date(item.timestamp).toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
-      }
-      store.put(item);
+    data.forEach((item, idx) => {
+      // Ensure required fields
+      const session = {
+        id: idx,
+        type: item.type || 'Target',
+        date: item.date || new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' }),
+        duration: item.duration || '0:00',
+        target: item.target || '',
+        timestamp: item.timestamp || Date.now()
+      };
+      store.put(session);
     });
 
     await new Promise((resolve, reject) => {
@@ -838,7 +844,7 @@ body.theme-sketch {
       tx.onerror = () => reject(tx.error);
     });
 
-    alert('✅ Backup restored');
+    alert(`✅ Restored ${data.length} sessions`);
     
     setTimeout(() => {
       loadChartDaily();
@@ -858,7 +864,7 @@ body.theme-sketch {
     
   } catch (error) {
     console.error('Restore error:', error);
-    alert('❌ Failed to restore backup: ' + error.message);
+    alert('❌ Failed to restore: ' + error.message);
   }
 }
 
